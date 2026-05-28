@@ -1,0 +1,27 @@
+listen:
+  host: 0.0.0.0
+  port: 8090
+
+request_timeout_seconds: 180
+
+backends:
+  powerful-mini:
+    base_url: http://mac-mini-1.local:8080/v1
+    models:
+      - mlx-community/Qwen3-VL-8B-Instruct-6bit
+    max_concurrency: 1
+
+  fast-mini:
+    base_url: http://mac-mini-2.local:8080/v1
+    models:
+      - mlx-community/UI-TARS-1.5-7B-6bit
+    max_concurrency: 1
+
+  cuda-3070:
+    base_url: http://vision-pc.local:8080/v1
+    models:
+      - Qwen/Qwen2.5-VL-7B-Instruct
+    tags:
+      - cuda
+      - 8gb-vram
+    max_concurrency: 1
