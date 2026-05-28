@@ -3,12 +3,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import httpx
 import uvicorn
 import yaml
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, Response
 
 from .backends import BackendManager
-from .models import RouterConfig
+from .models import ChatCompletionRequest, RouterConfig
+from .router import make_chat_response, route_and_forward
 
 
 def load_config(path: str | os.PathLike[str]) -> dict:
@@ -43,6 +46,19 @@ def create_app(config: dict | None = None) -> FastAPI:
         for name, backend in app.state.backend_manager.backends.items():
             results[name] = await app.state.backend_manager.health_check(name, backend)
         return results
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request, body: ChatCompletionRequest) -> Response:
+        manager = request.app.state.backend_manager
+        try:
+            route_result = await route_and_forward(manager, body)
+        except ValueError as e:
+            return JSONResponse(status_code=400, content={"error": str(e)})
+        except httpx.HTTPStatusError as e:
+            return JSONResponse(status_code=502, content={"error": "Backend error", "detail": str(e)})
+
+        response = await make_chat_response(route_result, body.model)
+        return Response(content=response.model_dump_json(), media_type="application/json")
 
     return app
 
