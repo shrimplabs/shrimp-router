@@ -1,6 +1,7 @@
 """Tests for the /v1/chat/completions proxy endpoint."""
 
 import asyncio
+import httpx
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -163,14 +164,18 @@ async def test_semaphore_limits_concurrent_requests():
         # Wait until signalled before releasing
         await release_event.wait()
         concurrent_count -= 1
-        return MagicMock(json=lambda: {
-            "id": "chatcmpl-1",
-            "object": "chat.completion",
-            "created": 1234567890,
-            "model": backend.models[0],
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-        })
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 1234567890,
+                "model": backend.models[0],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+            request=MagicMock(),
+        )
 
 
     # Build a manager with a real PerBackendSemaphore

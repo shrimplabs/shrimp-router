@@ -39,7 +39,18 @@ async def route_and_forward(
 
 
 async def make_chat_response(route_result: RouteResult, model: str) -> ChatCompletionResponse:
-    """Parse backend JSON and replace model name with the requested one."""
-    data = route_result.response.json()
+    """Parse backend JSON and replace model name with the requested one.
+
+    Raises httpx.HTTPStatusError for non-2xx responses so callers
+    can translate backend errors into 502 Bad Gateway.
+    """
+    resp = route_result.response
+    if not (200 <= resp.status_code < 300):
+        raise httpx.HTTPStatusError(
+            f"Backend returned {resp.status_code}",
+            request=resp.request or httpx.Request("POST", ""),
+            response=resp,
+        )
+    data = resp.json()
     data["model"] = model
     return ChatCompletionResponse.model_validate(data)
