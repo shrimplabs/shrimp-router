@@ -1,7 +1,7 @@
 """Tests for the /v1/chat/completions proxy endpoint."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
