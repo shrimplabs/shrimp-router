@@ -7,6 +7,9 @@ import uvicorn
 import yaml
 from fastapi import FastAPI
 
+from .backends import BackendManager
+from .models import RouterConfig
+
 
 def load_config(path: str | os.PathLike[str]) -> dict:
     config_path = Path(path)
@@ -23,13 +26,23 @@ def create_app(config: dict | None = None) -> FastAPI:
     app = FastAPI(title="Shrimp Vision Router")
     app.state.config = config or {}
 
+    if config:
+        router_config = RouterConfig.model_validate(config)
+        app.state.backend_manager = BackendManager(
+            router_config.backends,
+            router_config.request_timeout_seconds,
+        )
+    else:
+        app.state.backend_manager = None
+
     @app.get("/health")
     async def health() -> dict:
-        backends = app.state.config.get("backends", {})
-        return {
-            "ok": True,
-            "backend_count": len(backends) if isinstance(backends, dict) else 0,
-        }
+        if app.state.backend_manager is None:
+            return {"ok": True, "backend_count": 0}
+        results = {}
+        for name, backend in app.state.backend_manager.backends.items():
+            results[name] = await app.state.backend_manager.health_check(name, backend)
+        return results
 
     return app
 
