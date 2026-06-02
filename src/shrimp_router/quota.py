@@ -1,10 +1,15 @@
-"""Sliding-window quota tracking per backend."""
+"""Sliding-window quota tracking per backend, with live polling for MiniMax."""
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
+
+import httpx
+
+logger = logging.getLogger(__name__)
 
 
 class QuotaTracker:
@@ -81,6 +86,13 @@ class QuotaRegistry:
         if tracker:
             tracker.record_429(retry_after)
 
+    def update_max(self, name: str, new_max: int) -> None:
+        """Update the quota ceiling for a backend (e.g. from a live API poll)."""
+        tracker = self._trackers.get(name)
+        if tracker:
+            with tracker._lock:
+                tracker._max = new_max
+
     def stats(self) -> dict[str, dict]:
         return {
             name: {
@@ -90,3 +102,95 @@ class QuotaRegistry:
             }
             for name, t in self._trackers.items()
         }
+
+
+# ---------------------------------------------------------------------------
+# Provider-specific live quota pollers
+# ---------------------------------------------------------------------------
+
+class MinimaxQuotaPoller:
+    """Polls the MiniMax coding-plan quota API and updates the QuotaRegistry.
+
+    MiniMax endpoint:
+      GET https://www.minimax.io/v1/api/openplatform/coding_plan/remains
+    Response fields we care about:
+      current_interval_total_count   — total quota in this window
+      current_interval_usage_count   — remaining (confusingly named)
+    """
+
+    ENDPOINT = "https://www.minimax.io/v1/api/openplatform/coding_plan/remains"
+    POLL_INTERVAL = 300  # seconds between polls (5 minutes)
+
+    def __init__(
+        self,
+        api_key: str,
+        registry: "QuotaRegistry",
+        backend_name: str = "minimax",
+        poll_interval: int = POLL_INTERVAL,
+    ) -> None:
+        self._api_key = api_key
+        self._registry = registry
+        self._backend_name = backend_name
+        self._poll_interval = poll_interval
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+
+    def _fetch(self) -> dict | None:
+        try:
+            resp = httpx.get(
+                self.ENDPOINT,
+                headers={"Authorization": f"Bearer {self._api_key}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return resp.json()
+            logger.warning(f"[quota-poller] MiniMax returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"[quota-poller] MiniMax poll failed: {e}")
+        return None
+
+    def _apply(self, data: dict) -> None:
+        model_remains = data.get("model_remains", [])
+        for entry in model_remains:
+            name = entry.get("model_name", "")
+            if "MiniMax" not in name:
+                continue
+            total = entry.get("current_interval_total_count", 0)
+            remaining = entry.get("current_interval_usage_count", 0)  # remaining, despite name
+            used = total - remaining
+            if total > 0:
+                # Set ceiling to 90% of total to cut over before hitting the wall
+                ceiling = int(total * 0.90)
+                self._registry.update_max(self._backend_name, ceiling)
+                # Sync our used count: if the API says more is used than we've counted,
+                # inject synthetic timestamps to bring our counter up to date
+                tracker = self._registry.get(self._backend_name)
+                if tracker and tracker.used < used:
+                    gap = used - tracker.used
+                    with tracker._lock:
+                        now = time.monotonic()
+                        for _ in range(gap):
+                            tracker._timestamps.append(now)
+                logger.info(
+                    f"[quota-poller] {self._backend_name}: {used}/{total} used "
+                    f"(ceiling set to {ceiling})"
+                )
+            break
+
+    def poll_once(self) -> None:
+        data = self._fetch()
+        if data:
+            self._apply(data)
+
+    def start(self) -> None:
+        """Start background polling thread."""
+        self.poll_once()  # immediate first poll
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="minimax-quota-poller")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self._poll_interval):
+            self.poll_once()

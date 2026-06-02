@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .backends import BackendManager
 from .models import ChatCompletionRequest, RouterConfig
+from .quota import MinimaxQuotaPoller
 from .router import handle_chat
 
 logger = logging.getLogger(__name__)
@@ -33,14 +34,29 @@ def create_app(config: dict | None = None) -> FastAPI:
     app = FastAPI(title="Shrimp Router", version="0.2.0")
     cfg = config or {}
 
+    app.state.quota_pollers: list[MinimaxQuotaPoller] = []
+
     if cfg.get("backends"):
         router_config = RouterConfig.model_validate(cfg)
-        app.state.backend_manager = BackendManager(router_config)
+        mgr = BackendManager(router_config)
+        app.state.backend_manager = mgr
+
+        # Start live quota pollers for any backend that has a MiniMax API key
+        for name, backend in router_config.backends.items():
+            if backend.auth_env and "minimax" in name.lower():
+                api_key = os.environ.get(backend.auth_env)
+                if api_key:
+                    poller = MinimaxQuotaPoller(api_key, mgr._quota, backend_name=name)
+                    poller.start()
+                    app.state.quota_pollers.append(poller)
+                    logger.info(f"[quota-poller] Live MiniMax quota polling started for '{name}'")
     else:
         app.state.backend_manager = None
 
     @app.on_event("shutdown")
     async def _shutdown():
+        for poller in app.state.quota_pollers:
+            poller.stop()
         if app.state.backend_manager:
             await app.state.backend_manager.close()
 
