@@ -33,6 +33,7 @@ def load_config(path: str | os.PathLike[str]) -> dict:
 def create_app(config: dict | None = None) -> FastAPI:
     app = FastAPI(title="Shrimp Router", version="0.2.0")
     cfg = config or {}
+    app.state.config = cfg
 
     app.state.quota_pollers: list[MinimaxQuotaPoller] = []
 

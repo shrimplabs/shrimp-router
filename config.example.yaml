@@ -76,6 +76,15 @@ backends:
     tags: ["vision", "vlm"]
     health_check_path: "/health"
 
+escalation:
+  enabled: true          # set false to disable if it causes problems
+  loop_threshold: 50     # escalate after this many loops with no commits
+  backends:              # strongest-first override order
+    - minimax
+    - opencode
+    - kimi
+    - openrouter
+
 routing:
   # Vision requests (image_url in messages) go to the VLM pool
   vision_backends:

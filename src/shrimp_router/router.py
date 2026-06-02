@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 
 import httpx
@@ -14,15 +13,50 @@ from .models import ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
 
+# Escalation: if an agent is struggling (high loop count, no commits yet),
+# override the normal routing and promote to the strongest available backend.
+# Toggle via config: escalation.enabled (default true)
+_ESCALATION_LOOP_THRESHOLD = 50   # loops before escalation kicks in
+_ESCALATION_BACKENDS = ["minimax", "opencode", "kimi", "openrouter"]  # strongest first
+
+
+def _escalation_candidates(manager: BackendManager, config: dict) -> list[str] | None:
+    """Return override backend list if escalation is configured and enabled."""
+    esc = config.get("escalation", {})
+    if not esc.get("enabled", True):
+        return None
+    return esc.get("backends", _ESCALATION_BACKENDS)
+
+
+def _should_escalate(request: Request, config: dict) -> bool:
+    """True if this request should be escalated to a stronger model."""
+    esc = config.get("escalation", {})
+    if not esc.get("enabled", True):
+        return False
+    try:
+        loop = int(request.headers.get("X-Loop-Count", 0))
+        has_commits = request.headers.get("X-Has-Commits", "true").lower() == "true"
+        threshold = int(esc.get("loop_threshold", _ESCALATION_LOOP_THRESHOLD))
+        return loop >= threshold and not has_commits
+    except Exception:
+        return False
+
 
 async def handle_chat(request: Request, body: ChatCompletionRequest) -> StreamingResponse | dict:
     """Route a chat completion request, with fallback on 429/error."""
     manager: BackendManager = request.app.state.backend_manager
+    config: dict = request.app.state.config
     task_type = request.headers.get("X-Task-Type")
     is_vision = body.is_vision_request()
     stream = body.stream or False
 
-    candidates = manager.pick_backends(task_type, is_vision)
+    if _should_escalate(request, config):
+        loop = request.headers.get("X-Loop-Count", "?")
+        logger.info(f"[router] escalating (loop={loop}, no commits) → strongest backend")
+        candidates = _escalation_candidates(manager, config) or manager.pick_backends(task_type, is_vision)
+    else:
+        candidates = manager.pick_backends(task_type, is_vision)
+
     if not candidates:
         return {"error": "No backends configured", "status_code": 503}
 
@@ -30,6 +64,8 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
     last_error: str = "No backends available"
 
     for name in candidates:
+        if name not in manager.backends:
+            continue
         if not manager._quota.has_capacity(name):
             logger.info(f"[router] {name} quota exhausted, skipping")
             continue
@@ -53,7 +89,6 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
         if not (200 <= resp.status_code < 300):
             logger.warning(f"[router] {name} returned {resp.status_code}")
             last_error = f"{name}: HTTP {resp.status_code}"
-            # Don't retry on 4xx client errors
             if 400 <= resp.status_code < 500:
                 break
             continue
@@ -68,7 +103,7 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
             )
 
         data = resp.json()
-        data["model"] = body.model  # echo back requested model name
+        data["model"] = body.model
         data["_backend"] = name
         return data
 
@@ -76,17 +111,14 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
 
 
 def _build_payload(body: ChatCompletionRequest) -> dict:
-    """Serialize request, dropping None fields."""
     d = body.model_dump(mode="json", exclude_none=True)
     d.pop("extra_body", None)
-    # Merge extra_body fields in if present
     if body.extra_body:
         d.update(body.extra_body)
     return d
 
 
 async def _stream_response(resp: httpx.Response, backend_name: str):
-    """Proxy SSE stream from backend to client."""
     try:
         async for chunk in resp.aiter_bytes():
             yield chunk
