@@ -54,7 +54,7 @@ backends:
   # Local VLM nodes
   vlm-m4-1:
     base_url: "http://m4-1.local:8081/v1"
-    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
     max_concurrency: 2
     weight: 1
     tags: ["vision", "vlm"]
@@ -62,7 +62,7 @@ backends:
 
   vlm-m4-2:
     base_url: "http://m4-2.local:8081/v1"
-    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
     max_concurrency: 2
     weight: 1
     tags: ["vision", "vlm"]
@@ -70,7 +70,7 @@ backends:
 
   vlm-3070:
     base_url: "http://3070.local:11434/v1"
-    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
     max_concurrency: 3
     weight: 2   # faster GPU throughput
     tags: ["vision", "vlm"]

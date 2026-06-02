@@ -2,7 +2,7 @@
 # Run on M4 Mac Minis — starts mlx_vlm vision server
 # Usage: ./start-vlm-apple.sh
 
-MODEL="${VLM_MODEL:-mlx-community/Qwen2.5-VL-7B-Instruct-4bit}"
+MODEL="${VLM_MODEL:-mlx-community/Qwen3-VL-8B-Instruct-6bit}"
 PORT="${VLM_PORT:-8081}"
 
 echo "==> Checking mlx_vlm..."
