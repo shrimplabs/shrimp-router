@@ -72,14 +72,21 @@ class BackendManager:
             return {"Authorization": f"Bearer {key}"}
         return {}
 
-    def pick_backends(self, task_type: str | None, is_vision: bool) -> list[str]:
+    async def pick_backends(self, task_type: str | None, is_vision: bool) -> list[str]:
         """Return ordered list of backend names to try for this request."""
         if is_vision:
-            # Vision: VLM pool first, then any backend tagged vision
+            # Vision: use round-robin VLM pool to distribute load, then fallback to rest
             vision = self.routing.vision_backends or [
                 n for n, b in self.backends.items() if "vision" in b.tags or "vlm" in b.tags
             ]
-            return vision if vision else list(self.backends.keys())
+            if not vision:
+                return list(self.backends.keys())
+            if self._vlm_pool:
+                first = await self._vlm_pool.next()
+                # Rotate: first = round-robin pick, rest = others in order as fallback
+                rest = [n for n in vision if n != first]
+                return [first] + rest
+            return vision
 
         # Text: check task_type routing first
         if task_type and task_type in self.routing.task_type_backends:
