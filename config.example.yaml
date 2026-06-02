@@ -1,27 +1,88 @@
 listen:
-  host: 0.0.0.0
+  host: "0.0.0.0"
   port: 8090
 
-request_timeout_seconds: 180
+request_timeout_seconds: 300
 
 backends:
-  powerful-mini:
-    base_url: http://mac-mini-1.local:8080/v1
-    models:
-      - mlx-community/Qwen3-VL-8B-Instruct-6bit
-    max_concurrency: 1
+  minimax:
+    base_url: "https://api.minimax.chat/v1"
+    models: ["MiniMax-M3", "MiniMax-M2.7"]
+    max_concurrency: 8
+    weight: 2
+    tags: ["text", "vision"]
+    auth_env: "MINIMAX_API_KEY"
+    quota:
+      window_seconds: 18000   # 5 hours
+      max_requests: 3000
 
-  fast-mini:
-    base_url: http://mac-mini-2.local:8080/v1
-    models:
-      - mlx-community/UI-TARS-1.5-7B-6bit
-    max_concurrency: 1
+  kimi:
+    base_url: "https://api.moonshot.cn/v1"
+    models: ["k2p5", "kimi-k2", "moonshot-v1-8k"]
+    max_concurrency: 6
+    weight: 2
+    tags: ["text"]
+    auth_env: "KIMI_API_KEY"
+    quota:
+      window_seconds: 18000
+      max_requests: 2000
 
-  cuda-3070:
-    base_url: http://vision-pc.local:8080/v1
-    models:
-      - Qwen/Qwen2.5-VL-7B-Instruct
-    tags:
-      - cuda
-      - 8gb-vram
-    max_concurrency: 1
+  opencode:
+    base_url: "https://api.opencode.ai/v1"
+    models: ["MiniMax-M3", "kimi-k2", "qwen-3.7-max", "deepseek-v4-flash", "deepseek-v4-pro"]
+    max_concurrency: 6
+    weight: 1
+    tags: ["text"]
+    auth_env: "OPENCODE_API_KEY"
+    quota:
+      window_seconds: 18000
+      max_requests: 1500
+
+  # Local VLM nodes
+  vlm-m4-1:
+    base_url: "http://m4-1.local:8081/v1"
+    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    max_concurrency: 2
+    weight: 1
+    tags: ["vision", "vlm"]
+    health_check_path: "/health"
+
+  vlm-m4-2:
+    base_url: "http://m4-2.local:8081/v1"
+    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    max_concurrency: 2
+    weight: 1
+    tags: ["vision", "vlm"]
+    health_check_path: "/health"
+
+  vlm-3070:
+    base_url: "http://3070.local:11434/v1"
+    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    max_concurrency: 3
+    weight: 2   # faster GPU throughput
+    tags: ["vision", "vlm"]
+    health_check_path: "/health"
+
+routing:
+  # Vision requests (image_url in messages) go to the VLM pool
+  vision_backends:
+    - vlm-m4-1
+    - vlm-m4-2
+    - vlm-3070
+
+  # Default text routing — MiniMax first, then Kimi, overflow to OpenCode
+  default_backends:
+    - minimax
+    - kimi
+    - opencode
+
+  # Task-type routing via X-Task-Type header
+  task_type_backends:
+    feature:    [minimax, opencode, kimi]
+    refactor:   [minimax, opencode, kimi]
+    bug:        [kimi, opencode, minimax]
+    polish:     [kimi, opencode, minimax]
+    research:   [opencode, kimi, minimax]   # deepseek-v4-flash is cheap for read-only
+    plan:       [opencode, kimi, minimax]
+    qa:         [minimax, opencode]         # needs vision
+    art_pass:   [minimax, opencode]         # needs vision
