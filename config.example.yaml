@@ -38,6 +38,19 @@ backends:
       window_seconds: 18000
       max_requests: 1500
 
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    # Pay-per-use — use cheap models to stretch $9 as far as possible
+    # deepseek/deepseek-chat: ~$0.27/1M tokens (great for bug/research)
+    # qwen/qwen-2.5-72b-instruct: ~$0.35/1M tokens (solid for features)
+    # anthropic/claude-3-haiku: ~$0.25/1M tokens (fast, reliable fallback)
+    models: ["deepseek/deepseek-chat", "qwen/qwen-2.5-72b-instruct", "anthropic/claude-3-haiku"]
+    max_concurrency: 4
+    weight: 1
+    tags: ["text"]
+    auth_env: "OPENROUTER_API_KEY"
+    # No quota block — pay-per-use, router will use it only as last fallback
+
   # Local VLM nodes
   vlm-m4-1:
     base_url: "http://m4-1.local:8081/v1"
@@ -70,19 +83,20 @@ routing:
     - vlm-m4-2
     - vlm-3070
 
-  # Default text routing — MiniMax first, then Kimi, overflow to OpenCode
+  # Default text routing — MiniMax first, then Kimi, OpenCode, OpenRouter as last resort
   default_backends:
     - minimax
     - kimi
     - opencode
+    - openrouter
 
   # Task-type routing via X-Task-Type header
   task_type_backends:
-    feature:    [minimax, opencode, kimi]
-    refactor:   [minimax, opencode, kimi]
-    bug:        [kimi, opencode, minimax]
-    polish:     [kimi, opencode, minimax]
-    research:   [opencode, kimi, minimax]   # deepseek-v4-flash is cheap for read-only
-    plan:       [opencode, kimi, minimax]
-    qa:         [minimax, opencode]         # needs vision
-    art_pass:   [minimax, opencode]         # needs vision
+    feature:    [minimax, opencode, kimi, openrouter]
+    refactor:   [minimax, opencode, kimi, openrouter]
+    bug:        [kimi, opencode, minimax, openrouter]
+    polish:     [kimi, opencode, minimax, openrouter]
+    research:   [opencode, kimi, openrouter, minimax]  # deepseek cheap for read-only
+    plan:       [opencode, kimi, openrouter, minimax]
+    qa:         [minimax, opencode, openrouter]        # needs vision
+    art_pass:   [minimax, opencode, openrouter]        # needs vision

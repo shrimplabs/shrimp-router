@@ -175,6 +175,7 @@ curl http://localhost:8090/health
 | `MINIMAX_API_KEY` | MiniMax auth |
 | `KIMI_API_KEY` | Kimi auth |
 | `OPENCODE_API_KEY` | OpenCode Go auth |
+| `OPENROUTER_API_KEY` | OpenRouter auth (pay-per-use fallback) |
 | `SHRIMP_ROUTER_CONFIG` | Path to config.yaml (default: `./config.yaml`) |
 | `M4_1_HOST` | Hostname for first M4 mini (default: `m4-1.local`) |
 | `M4_2_HOST` | Hostname for second M4 mini (default: `m4-2.local`) |
