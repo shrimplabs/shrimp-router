@@ -1,45 +1,182 @@
-# Shrimp Vision Router
+# Shrimp Router
 
-A tiny OpenAI-compatible router for pooling local VLM workers across a LAN, with per-backend concurrency limits, health checks, and simple model routing.
+An intelligent OpenAI-compatible gateway for routing LLM and VLM requests across multiple subscription providers and local hardware nodes.
 
-## Goal
+Sits between your agents and your backends. Handles quota tracking, task-type routing, vision detection, weighted load balancing across a VLM node pool, and automatic fallback on 429s — without any changes to the agents themselves.
 
-Shrimp Vision Router sits between clients and local vision-language model servers such as `mlx_vlm.server`, vLLM, Ollama, LM Studio, or any OpenAI-compatible VLM endpoint.
+## Architecture
 
-It exposes a stable OpenAI-compatible API:
-
-```text
-POST /v1/chat/completions
-GET  /health
+```
+agents / swarm-controller
+        ↓  POST /v1/chat/completions
+  shrimp-router :8090
+        ↓
+  routing logic:
+  ┌─────────────────────────────────────────────────┐
+  │ vision request? (image_url in messages)          │
+  │   → weighted round-robin: M4-1, M4-2, 3070      │
+  │                                                  │
+  │ text request + X-Task-Type header                │
+  │   bug/polish    → Kimi → OpenCode → MiniMax      │
+  │   feature/refactor → MiniMax → OpenCode → Kimi   │
+  │   research/plan → OpenCode (cheap) → Kimi        │
+  │                                                  │
+  │ quota exhausted? → skip to next provider         │
+  │ 429?            → backoff + try next             │
+  └─────────────────────────────────────────────────┘
+        ↓
+  MiniMax / Kimi / OpenCode Go  (subscription text)
+  M4-mini-1 / M4-mini-2 / 3070 (local VLM nodes)
 ```
 
-and forwards requests to configured backends while protecting each machine with explicit concurrency limits.
+## Quickstart
 
-## Initial Use Case
+### 1. Start VLM nodes
 
-Run model servers on multiple LAN machines:
-
-```sh
-python3 -m mlx_vlm.server --host 0.0.0.0 --port 8080
-# or, on CUDA hosts:
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct --host 0.0.0.0 --port 8080
+**On each M4 Mac Mini:**
+```bash
+git clone git@github.com:shrimplabs/shrimp-router.git
+./scripts/start-vlm-apple.sh
 ```
 
-Then point clients at the router instead of a single local machine.
+**On the 3070 PC:**
+```bash
+./scripts/start-vlm-cuda.sh
+```
 
-## Planned Features
+### 2. Start the whole cluster from your main Mac
 
-- OpenAI-compatible `/v1/chat/completions` proxy
-- YAML configuration for backend workers
-- Model-to-backend routing across MLX, CUDA, Ollama, LM Studio, and other OpenAI-compatible workers
-- Per-backend concurrency caps
-- Health checks
-- Request timeouts and one retry on compatible backends
-- Structured request logs
-- Optional LAN-only bearer token
+Edit the hostnames at the top of `scripts/start-cluster.sh`, then:
 
-## Non-Goals
+```bash
+./scripts/start-cluster.sh
+```
 
-- No swarm-controller-specific task logic
-- No database in the first version
-- No model serving implementation; backend workers serve models themselves
+SSHs into all three nodes, starts their servers, waits 15s, health-checks each one.
+
+### 3. Start the router
+
+```bash
+./scripts/start-router.sh
+```
+
+First run copies `config.example.yaml` → `config.yaml`. Edit with your hostnames and API keys, then run again.
+
+### 4. Point your agents at the router
+
+In swarm-controller `config.json`:
+```json
+{
+  "llm_providers": {
+    "minimax": {
+      "base_url": "http://localhost:8090/v1",
+      "model": "MiniMax-M3",
+      "format": "openai"
+    }
+  }
+}
+```
+
+That's it. The router handles everything else.
+
+## Configuration
+
+Copy `config.example.yaml` to `config.yaml` and edit:
+
+```yaml
+listen:
+  host: "0.0.0.0"
+  port: 8090
+
+backends:
+  minimax:
+    base_url: "https://api.minimax.chat/v1"
+    models: ["MiniMax-M3"]
+    auth_env: "MINIMAX_API_KEY"      # reads key from environment variable
+    weight: 2
+    tags: ["text"]
+    quota:
+      window_seconds: 18000          # 5-hour window
+      max_requests: 3000
+
+  vlm-m4-1:
+    base_url: "http://m4-1.local:8081/v1"
+    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    tags: ["vision", "vlm"]
+    weight: 1
+
+  vlm-3070:
+    base_url: "http://3070.local:11434/v1"
+    models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    tags: ["vision", "vlm"]
+    weight: 2                        # 3070 gets 2x traffic share
+
+routing:
+  vision_backends: [vlm-m4-1, vlm-m4-2, vlm-3070]
+  default_backends: [minimax, kimi, opencode]
+  task_type_backends:
+    bug:     [kimi, opencode, minimax]
+    feature: [minimax, opencode, kimi]
+    qa:      [minimax, opencode]
+```
+
+See `config.example.yaml` for the full example with all backends and task types.
+
+## Task-type routing
+
+Add an `X-Task-Type` header and the router picks the preferred backend:
+
+```
+X-Task-Type: bug       → Kimi first (fast, cheap)
+X-Task-Type: feature   → MiniMax first (large context)
+X-Task-Type: research  → OpenCode DeepSeek Flash (cheapest)
+X-Task-Type: qa        → MiniMax (vision capable)
+```
+
+Falls back automatically if the preferred backend is rate-limited or at quota.
+
+## Vision routing
+
+Any request containing an `image_url` content part is automatically routed to the VLM node pool. The pool uses weighted round-robin — set `weight: 2` on the 3070 to give it twice the share of requests vs each M4.
+
+## Quota tracking
+
+Each backend has a sliding-window counter. When a backend hits `max_requests` or returns a 429, it's skipped for the remainder of the window automatically.
+
+Check status:
+```bash
+curl http://localhost:8090/health
+```
+
+```json
+{
+  "ok": true,
+  "backends": {"minimax": true, "kimi": true},
+  "quota": {
+    "minimax": {"used": 1240, "remaining": 1760, "rate_limited": false},
+    "kimi":    {"used": 430,  "remaining": 1570, "rate_limited": false}
+  }
+}
+```
+
+## Node scripts
+
+| Script | Run on | Does |
+|--------|--------|------|
+| `scripts/start-vlm-apple.sh` | M4 Mac Mini | Installs mlx_vlm if needed, starts vision server on `:8081` |
+| `scripts/start-vlm-cuda.sh` | 3070 PC | Installs ollama if needed, pulls model, serves on `:11434` |
+| `scripts/start-cluster.sh` | Main Mac | SSHs into all nodes, starts servers, health-checks after 15s |
+| `scripts/start-router.sh` | Main Mac | Starts the gateway on `:8090` |
+
+## Environment variables
+
+| Variable | Purpose |
+|----------|---------|
+| `MINIMAX_API_KEY` | MiniMax auth |
+| `KIMI_API_KEY` | Kimi auth |
+| `OPENCODE_API_KEY` | OpenCode Go auth |
+| `SHRIMP_ROUTER_CONFIG` | Path to config.yaml (default: `./config.yaml`) |
+| `M4_1_HOST` | Hostname for first M4 mini (default: `m4-1.local`) |
+| `M4_2_HOST` | Hostname for second M4 mini (default: `m4-2.local`) |
+| `PC_3070_HOST` | Hostname for 3070 PC (default: `3070.local`) |
+| `VLM_SSH_USER` | SSH username for cluster script (default: current user) |
