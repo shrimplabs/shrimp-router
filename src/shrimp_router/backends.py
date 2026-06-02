@@ -106,7 +106,7 @@ class BackendManager:
         try:
             base = cfg.base_url.rstrip("/").removesuffix("/v1")
             path = cfg.health_check_path
-            resp = await self._client.head(f"{base}{path}", timeout=httpx.Timeout(timeout))
+            resp = await self._client.get(f"{base}{path}", timeout=httpx.Timeout(timeout))
             ok = 200 <= resp.status_code < 400
             if ok:
                 self._health[name] = time.monotonic()
