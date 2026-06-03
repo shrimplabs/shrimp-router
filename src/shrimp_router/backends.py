@@ -126,10 +126,11 @@ class BackendManager:
         name: str,
         payload: dict,
         stream: bool = False,
+        endpoint: str = "chat/completions",
     ) -> httpx.Response:
         cfg = self.backends[name]
         headers = {"Content-Type": "application/json", **self._auth_headers(name)}
-        url = f"{cfg.base_url.rstrip('/')}/chat/completions"
+        url = f"{cfg.base_url.rstrip('/')}/{endpoint}"
 
         async with self._semaphore(name):
             self._quota.record(name)

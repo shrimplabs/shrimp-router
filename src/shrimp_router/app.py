@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from .backends import BackendManager
 from .models import ChatCompletionRequest, RouterConfig
 from .quota import MinimaxQuotaPoller
-from .router import handle_chat
+from .router import handle_chat, _stream_response as _stream_anthropic
 
 logger = logging.getLogger(__name__)
 
@@ -84,12 +84,99 @@ def create_app(config: dict | None = None) -> FastAPI:
             status = result.pop("status_code")
             return JSONResponse(status_code=status, content=result)
 
-        # StreamingResponse passes through directly
         from fastapi.responses import StreamingResponse
         if isinstance(result, StreamingResponse):
             return result
 
         return result
+
+    @app.post("/v1/messages")
+    async def anthropic_messages(request: Request):
+        """Anthropic-format passthrough — forwards raw body to backend /messages endpoint."""
+        from fastapi.responses import StreamingResponse as SR
+        mgr = request.app.state.backend_manager
+        if mgr is None:
+            return JSONResponse(status_code=503, content={"error": "No backends configured"})
+
+        body_bytes = await request.body()
+        import json
+        try:
+            payload = json.loads(body_bytes)
+        except Exception:
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+
+        # Detect vision from Anthropic message format
+        is_vision = any(
+            isinstance(msg.get("content"), list) and
+            any(p.get("type") == "image" for p in msg["content"] if isinstance(p, dict))
+            for msg in payload.get("messages", [])
+            if isinstance(msg, dict)
+        )
+        task_type = request.headers.get("X-Task-Type")
+        stream = payload.get("stream", False)
+
+        candidates = await mgr.pick_backends(task_type, is_vision)
+        if not candidates:
+            return JSONResponse(status_code=503, content={"error": "No backends configured"})
+
+        # Forward extra Anthropic headers (anthropic-version, x-api-key, etc.)
+        extra_headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() in ("anthropic-version", "anthropic-beta", "x-api-key")
+        }
+
+        last_error = "No backends available"
+        for name in candidates:
+            if name not in mgr.backends:
+                continue
+            if not mgr._quota.has_capacity(name):
+                logger.info(f"[router] {name} quota exhausted, skipping")
+                continue
+            try:
+                import httpx as _httpx
+                cfg = mgr.backends[name]
+                headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
+                url = f"{cfg.base_url.rstrip('/')}/messages"
+                async with mgr._semaphore(name):
+                    mgr._quota.record(name)
+                    if stream:
+                        req = mgr._client.build_request("POST", url, content=body_bytes, headers=headers)
+                        resp = await mgr._client.send(req, stream=True)
+                    else:
+                        resp = await mgr._client.post(url, content=body_bytes, headers=headers)
+
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", 60))
+                    mgr._quota.record_429(name, retry_after)
+                    last_error = f"{name}: 429"
+                    continue
+
+                if not (200 <= resp.status_code < 300):
+                    logger.warning(f"[router] {name} returned {resp.status_code}")
+                    last_error = f"{name}: HTTP {resp.status_code}"
+                    if 400 <= resp.status_code < 500:
+                        return JSONResponse(status_code=resp.status_code, content=resp.json())
+                    continue
+
+                logger.info(f"[router] served by {name} (task_type={task_type}, vision={is_vision}, format=anthropic)")
+
+                if stream:
+                    return SR(
+                        _stream_anthropic(resp, name),
+                        media_type="text/event-stream",
+                        headers={"X-Backend": name},
+                    )
+
+                return JSONResponse(content=resp.json(), headers={"X-Backend": name})
+
+            except _httpx.TimeoutException:
+                logger.warning(f"[router] {name} timed out")
+                last_error = f"{name}: timeout"
+            except Exception as e:
+                logger.warning(f"[router] {name} error: {e}")
+                last_error = f"{name}: {e}"
+
+        return JSONResponse(status_code=502, content={"error": f"All backends failed: {last_error}"})
 
     return app
 
