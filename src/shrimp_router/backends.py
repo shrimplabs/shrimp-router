@@ -72,7 +72,12 @@ class BackendManager:
             return {"Authorization": f"Bearer {key}"}
         return {}
 
-    async def pick_backends(self, task_type: str | None, is_vision: bool) -> list[str]:
+    async def pick_backends(
+        self,
+        task_type: str | None,
+        is_vision: bool,
+        phase: str | None = None,
+    ) -> list[str]:
         """Return ordered list of backend names to try for this request."""
         if is_vision:
             # Vision: use round-robin VLM pool to distribute load, then fallback to rest
@@ -88,7 +93,12 @@ class BackendManager:
                 return [first] + rest
             return vision
 
-        # Text: check task_type routing first
+        # Phase routing takes priority over task_type routing
+        phase_backends = getattr(self.routing, "phase_backends", {}) or {}
+        if phase and phase in phase_backends and phase_backends[phase]:
+            return phase_backends[phase]
+
+        # Text: check task_type routing next
         if task_type and task_type in self.routing.task_type_backends:
             ordered = self.routing.task_type_backends[task_type]
         elif self.routing.default_backends:

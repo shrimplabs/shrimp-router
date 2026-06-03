@@ -58,6 +58,8 @@ class RoutingConfig(BaseModel):
     default_backends: list[str] = Field(default_factory=list)
     # Backend names that handle vision requests (image_url in messages)
     vision_backends: list[str] = Field(default_factory=list)
+    # Map pipeline phase → ordered list of backend names (X-Phase header)
+    phase_backends: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class ListenConfig(BaseModel):

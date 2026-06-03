@@ -47,15 +47,16 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
     manager: BackendManager = request.app.state.backend_manager
     config: dict = request.app.state.config
     task_type = request.headers.get("X-Task-Type")
+    phase = request.headers.get("X-Phase")
     is_vision = body.is_vision_request()
     stream = body.stream or False
 
     if _should_escalate(request, config):
         loop = request.headers.get("X-Loop-Count", "?")
         logger.info(f"[router] escalating (loop={loop}, no commits) → strongest backend")
-        candidates = _escalation_candidates(manager, config) or await manager.pick_backends(task_type, is_vision)
+        candidates = _escalation_candidates(manager, config) or await manager.pick_backends(task_type, is_vision, phase=phase)
     else:
-        candidates = await manager.pick_backends(task_type, is_vision)
+        candidates = await manager.pick_backends(task_type, is_vision, phase=phase)
 
     if not candidates:
         return {"error": "No backends configured", "status_code": 503}
