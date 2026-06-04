@@ -19,6 +19,51 @@ from .router import handle_chat, _stream_response as _stream_anthropic
 logger = logging.getLogger(__name__)
 
 
+def _anthropic_to_openai(payload: dict, model: str) -> dict:
+    """Translate Anthropic /messages payload to OpenAI /chat/completions payload."""
+    messages = []
+    system = payload.get("system")
+    if system:
+        if isinstance(system, str):
+            messages.append({"role": "system", "content": system})
+        elif isinstance(system, list):
+            # Anthropic system can be a list of content blocks
+            text = " ".join(b.get("text", "") for b in system if isinstance(b, dict))
+            messages.append({"role": "system", "content": text})
+
+    for msg in payload.get("messages", []):
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            messages.append({"role": role, "content": content})
+        elif isinstance(content, list):
+            # Convert Anthropic content blocks to OpenAI parts
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    if block.get("type") == "text":
+                        parts.append({"type": "text", "text": block.get("text", "")})
+                    elif block.get("type") == "image":
+                        src = block.get("source", {})
+                        if src.get("type") == "base64":
+                            parts.append({"type": "image_url", "image_url": {
+                                "url": f"data:{src.get('media_type', 'image/png')};base64,{src.get('data', '')}"
+                            }})
+            messages.append({"role": role, "content": parts if len(parts) > 1 else (parts[0].get("text", "") if parts else "")})
+
+    result: dict = {
+        "model": model,
+        "messages": messages,
+    }
+    if payload.get("max_tokens"):
+        result["max_tokens"] = payload["max_tokens"]
+    if payload.get("temperature") is not None:
+        result["temperature"] = payload["temperature"]
+    if payload.get("stream"):
+        result["stream"] = payload["stream"]
+    return result
+
+
 def load_config(path: str | os.PathLike[str]) -> dict:
     config_path = Path(path)
     if not config_path.exists():
@@ -113,9 +158,10 @@ def create_app(config: dict | None = None) -> FastAPI:
             if isinstance(msg, dict)
         )
         task_type = request.headers.get("X-Task-Type")
+        phase = request.headers.get("X-Phase")
         stream = payload.get("stream", False)
 
-        candidates = await mgr.pick_backends(task_type, is_vision)
+        candidates = await mgr.pick_backends(task_type, is_vision, phase=phase)
         if not candidates:
             return JSONResponse(status_code=503, content={"error": "No backends configured"})
 
@@ -135,15 +181,27 @@ def create_app(config: dict | None = None) -> FastAPI:
             try:
                 import httpx as _httpx
                 cfg = mgr.backends[name]
-                headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
-                url = f"{cfg.base_url.rstrip('/')}/messages"
+                backend_format = cfg.format  # "anthropic" or "openai"
+
+                if backend_format == "openai":
+                    # Translate Anthropic → OpenAI format
+                    fwd_payload = _anthropic_to_openai(payload, cfg.models[0] if cfg.models else payload.get("model", ""))
+                    fwd_bytes = json.dumps(fwd_payload).encode()
+                    fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name)}
+                    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
+                else:
+                    # Passthrough Anthropic → Anthropic
+                    fwd_bytes = body_bytes
+                    fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
+                    url = f"{cfg.base_url.rstrip('/')}/messages"
+
                 async with mgr._semaphore(name):
                     mgr._quota.record(name)
                     if stream:
-                        req = mgr._client.build_request("POST", url, content=body_bytes, headers=headers)
+                        req = mgr._client.build_request("POST", url, content=fwd_bytes, headers=fwd_headers)
                         resp = await mgr._client.send(req, stream=True)
                     else:
-                        resp = await mgr._client.post(url, content=body_bytes, headers=headers)
+                        resp = await mgr._client.post(url, content=fwd_bytes, headers=fwd_headers)
 
                 if resp.status_code == 429:
                     retry_after = float(resp.headers.get("Retry-After", 60))
@@ -158,7 +216,7 @@ def create_app(config: dict | None = None) -> FastAPI:
                         return JSONResponse(status_code=resp.status_code, content=resp.json())
                     continue
 
-                logger.info(f"[router] served by {name} (task_type={task_type}, vision={is_vision}, format=anthropic)")
+                logger.info(f"[router] served by {name} (task_type={task_type}, phase={phase}, vision={is_vision}, format=anthropic)")
 
                 if stream:
                     return SR(

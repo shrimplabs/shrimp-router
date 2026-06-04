@@ -33,6 +33,7 @@ class BackendConfig(BaseModel):
     task_types: list[str] = Field(default_factory=list)  # e.g. ["bug", "polish"]
     quota: QuotaConfig | None = None
     health_check_path: str = "/health"
+    format: str = "anthropic"  # "anthropic" or "openai" — wire format this backend expects
 
     @field_validator("base_url")
     @classmethod
