@@ -190,8 +190,12 @@ def create_app(config: dict | None = None) -> FastAPI:
                     fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name)}
                     url = f"{cfg.base_url.rstrip('/')}/chat/completions"
                 else:
-                    # Passthrough Anthropic → Anthropic
-                    fwd_bytes = body_bytes
+                    # Passthrough Anthropic → Anthropic, rewrite model to backend's model
+                    if cfg.models:
+                        fwd_payload = {**payload, "model": cfg.models[0]}
+                        fwd_bytes = json.dumps(fwd_payload).encode()
+                    else:
+                        fwd_bytes = body_bytes
                     fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
                     url = f"{cfg.base_url.rstrip('/')}/messages"
 
