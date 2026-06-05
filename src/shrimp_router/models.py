@@ -6,12 +6,20 @@ import os
 from typing import Any
 from urllib.parse import urlparse
 
+
 from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------------------------------------------------------------------
 # Backend / Router config
 # ---------------------------------------------------------------------------
+
+
+class CircuitBreakerConfig(BaseModel):
+    """Per-backend circuit breaker configuration."""
+
+    failure_threshold: int = Field(default=3, ge=1)
+    cooldown_seconds: int = Field(default=60, ge=1)
 
 
 class QuotaConfig(BaseModel):
@@ -24,6 +32,7 @@ class QuotaConfig(BaseModel):
 class BackendConfig(BaseModel):
     """Configuration for a single backend (text or vision)."""
 
+
     base_url: str
     models: list[str]
     max_concurrency: int = Field(default=4, ge=1)
@@ -32,8 +41,10 @@ class BackendConfig(BaseModel):
     auth_env: str | None = None  # env var name holding the API key
     task_types: list[str] = Field(default_factory=list)  # e.g. ["bug", "polish"]
     quota: QuotaConfig | None = None
+    circuit_breaker: CircuitBreakerConfig | None = None
     health_check_path: str = "/health"
-    format: str = "anthropic"  # "anthropic" or "openai" — wire format this backend expects
+    health_check_timeout_seconds: float = Field(default=5.0, gt=0)
+    format: str = "anthropic"  # "anthropic" or "openai" -- wire format this backend expects
 
     @field_validator("base_url")
     @classmethod
@@ -53,13 +64,13 @@ class BackendConfig(BaseModel):
 class RoutingConfig(BaseModel):
     """Task-type to backend preference ordering."""
 
-    # Map task_type → ordered list of backend names to try
+    # Map task_type -> ordered list of backend names to try
     task_type_backends: dict[str, list[str]] = Field(default_factory=dict)
     # Default backend preference order when no task_type match
     default_backends: list[str] = Field(default_factory=list)
     # Backend names that handle vision requests (image_url in messages)
     vision_backends: list[str] = Field(default_factory=list)
-    # Map pipeline phase → ordered list of backend names (X-Phase header)
+    # Map pipeline phase -> ordered list of backend names (X-Phase header)
     phase_backends: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -85,13 +96,14 @@ class RouterConfig(BaseModel):
 class ContentPart(BaseModel):
     """A single part of a multi-modal message (text or image_url)."""
 
+
     type: str  # "text" or "image_url"
     text: str | None = None
     image_url: dict[str, Any] | None = None
 
 
 class ChatMessage(BaseModel):
-    """A single message — content can be a string or list of parts."""
+    """A single message -- content can be a string or list of parts."""
 
     role: str
     content: str | list[ContentPart] | list[dict[str, Any]]
@@ -110,40 +122,19 @@ class ChatMessage(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    """OpenAI /v1/chat/completions request body."""
+    """OpenAI /v1/chat/completion request (validated subset)."""
+
 
     model: str
     messages: list[ChatMessage]
-    temperature: float | None = None
-    max_tokens: int | None = None
     stream: bool | None = None
-    thinking: dict[str, Any] | None = None  # Anthropic thinking budget passthrough
-    extra_body: dict[str, Any] | None = None
-
-    model_config = {"extra": "allow"}  # pass unknown fields through to backends
+    max_tokens: int | None = None
+    temperature: float | None = None
+    stop: str | list[str] | None = None
+    n: int | None = Field(default=None, ge=1)
 
     def is_vision_request(self) -> bool:
-        return any(m.has_images() for m in self.messages)
-
-
-class ChatCompletionChoice(BaseModel):
-    index: int
-    message: ChatMessage
-    finish_reason: str | None = None
-
-
-class ChatCompletionUsage(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-
-class ChatCompletionResponse(BaseModel):
-    id: str
-    object: str
-    created: int
-    model: str
-    choices: list[ChatCompletionChoice]
-    usage: ChatCompletionUsage
-
-    model_config = {"extra": "allow"}
+        for msg in self.messages:
+            if msg.has_images():
+                return True
+        return False

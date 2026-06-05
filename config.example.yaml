@@ -63,6 +63,7 @@ backends:
     weight: 1
     tags: ["vision", "vlm"]
     health_check_path: "/health"
+    health_check_timeout_seconds: 10  # slower model on this node, allow extra time
 
   vlm-m4-2:
     base_url: "http://m4-2.local:8081/v1"

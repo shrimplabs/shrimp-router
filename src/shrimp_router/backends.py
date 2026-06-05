@@ -131,14 +131,18 @@ class BackendManager:
         # All rate-limited -- return first anyway (let it 429 and we'll record it)
         return candidates[0] if candidates else None
 
-    async def health_check(self, name: str, timeout: float = 3.0) -> bool:
+    async def health_check(self, name: str, timeout: float | None = None) -> bool:
         cfg = self.backends.get(name)
         if not cfg:
             return False
+        # Resolve timeout: explicit arg > config field > 3.0 fallback
+        resolved = timeout if timeout is not None else (
+            cfg.health_check_timeout_seconds if cfg.health_check_timeout_seconds else 3.0
+        )
         try:
             base = cfg.base_url.rstrip("/").removesuffix("/v1")
             path = cfg.health_check_path
-            resp = await self._client.get(f"{base}{path}", timeout=httpx.Timeout(timeout))
+            resp = await self._client.get(f"{base}{path}", timeout=httpx.Timeout(resolved))
             ok = 200 <= resp.status_code < 400
             if ok:
                 self._health[name] = time.monotonic()
