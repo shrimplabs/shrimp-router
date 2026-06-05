@@ -139,7 +139,7 @@ def test_different_backends_have_independent_circuits():
     # backend-b stays closed
     assert cb2.state == CircuitState.CLOSED
 
-    # can_request on backend-b still works
+    # should_allow_request on backend-b still works
     assert cb2.should_allow_request() is True
 
     # backend-a still blocked
