@@ -89,7 +89,7 @@ def create_app(config: dict | None = None) -> FastAPI:
 
         # Start live quota pollers for any backend that has a MiniMax API key
         for name, backend in router_config.backends.items():
-            if backend.auth_env and "minimax" in name.lower():
+            if name == "minimax" and backend.auth_env and backend.quota:
                 api_key = os.environ.get(backend.auth_env)
                 if api_key:
                     poller = MinimaxQuotaPoller(api_key, mgr._quota, backend_name=name)
