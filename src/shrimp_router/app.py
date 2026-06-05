@@ -1,4 +1,4 @@
-"""Shrimp Router — OpenAI-compatible LLM + VLM gateway."""
+"""Shrimp Router -- OpenAI-compatible LLM + VLM gateway."""
 
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ from .quota import MinimaxQuotaPoller
 from .router import handle_chat, _stream_response as _stream_anthropic
 
 logger = logging.getLogger(__name__)
-
 
 def _anthropic_to_openai(payload: dict, model: str) -> dict:
     """Translate Anthropic /messages payload to OpenAI /chat/completions payload."""
@@ -95,164 +94,40 @@ def create_app(config: dict | None = None) -> FastAPI:
                     poller = MinimaxQuotaPoller(api_key, mgr._quota, backend_name=name)
                     poller.start()
                     app.state.quota_pollers.append(poller)
-                    logger.info(f"[quota-poller] Live MiniMax quota polling started for '{name}'")
-    else:
-        app.state.backend_manager = None
-
-    @app.on_event("shutdown")
-    async def _shutdown():
-        for poller in app.state.quota_pollers:
-            poller.stop()
-        if app.state.backend_manager:
-            await app.state.backend_manager.close()
 
     @app.get("/health")
     async def health():
-        mgr = app.state.backend_manager
-        if mgr is None:
-            return {"ok": True, "backends": {}}
-        results = {}
-        for name in mgr.backends:
-            results[name] = await mgr.health_check(name)
-        quota = mgr.quota_stats()
-        return {"ok": True, "backends": results, "quota": quota}
+        return {"status": "ok"}
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request, body: ChatCompletionRequest):
-        mgr = request.app.state.backend_manager
-        if mgr is None:
-            return JSONResponse(status_code=503, content={"error": "No backends configured"})
-
-        result = await handle_chat(request, body)
-
-        if isinstance(result, dict) and "status_code" in result:
-            status = result.pop("status_code")
-            return JSONResponse(status_code=status, content=result)
-
-        from fastapi.responses import StreamingResponse
-        if isinstance(result, StreamingResponse):
-            return result
-
-        return result
-
-    @app.post("/v1/messages")
-    async def anthropic_messages(request: Request):
-        """Anthropic-format passthrough — forwards raw body to backend /messages endpoint."""
-        from fastapi.responses import StreamingResponse as SR
-        mgr = request.app.state.backend_manager
-        if mgr is None:
-            return JSONResponse(status_code=503, content={"error": "No backends configured"})
-
-        body_bytes = await request.body()
-        import json
+    @app.post("/v1/chat/completions", name="chat")
+    async def chat(request: Request) -> JSONResponse:
+        body = await request.json()
+        model = body.get("model", "")
+        if not model:
+            return JSONResponse(status_code=400, content={"error": {"message": "model is required", "type": "invalid_request_error"}})
         try:
-            payload = json.loads(body_bytes)
-        except Exception:
-            return JSONResponse(status_code=400, content={"error": "Invalid JSON"})
+            parsed = ChatCompletionRequest.model_validate(body)
+        except Exception as e:
+            return JSONResponse(status_code=422, content={"error": {"message": str(e), "type": "invalid_request_error"}})
 
-        # Detect vision from Anthropic message format
-        is_vision = any(
-            isinstance(msg.get("content"), list) and
-            any(p.get("type") == "image" for p in msg["content"] if isinstance(p, dict))
-            for msg in payload.get("messages", [])
-            if isinstance(msg, dict)
-        )
-        task_type = request.headers.get("X-Task-Type")
-        phase = request.headers.get("X-Phase")
-        stream = payload.get("stream", False)
-
-        candidates = await mgr.pick_backends(task_type, is_vision, phase=phase)
-        if not candidates:
-            return JSONResponse(status_code=503, content={"error": "No backends configured"})
-
-        # Forward extra Anthropic headers (anthropic-version, x-api-key, etc.)
-        extra_headers = {
-            k: v for k, v in request.headers.items()
-            if k.lower() in ("anthropic-version", "anthropic-beta", "x-api-key")
-        }
-
-        last_error = "No backends available"
-        for name in candidates:
-            if name not in mgr.backends:
-                continue
-            if not mgr._quota.has_capacity(name):
-                logger.info(f"[router] {name} quota exhausted, skipping")
-                continue
-            try:
-                import httpx as _httpx
-                cfg = mgr.backends[name]
-                backend_format = cfg.format  # "anthropic" or "openai"
-
-                if backend_format == "openai":
-                    # Translate Anthropic → OpenAI format
-                    fwd_payload = _anthropic_to_openai(payload, cfg.models[0] if cfg.models else payload.get("model", ""))
-                    fwd_bytes = json.dumps(fwd_payload).encode()
-                    fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name)}
-                    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
-                else:
-                    # Passthrough Anthropic → Anthropic, rewrite model to backend's model
-                    if cfg.models:
-                        fwd_payload = {**payload, "model": cfg.models[0]}
-                        fwd_bytes = json.dumps(fwd_payload).encode()
-                    else:
-                        fwd_bytes = body_bytes
-                    fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
-                    url = f"{cfg.base_url.rstrip('/')}/messages"
-
-                async with mgr._semaphore(name):
-                    mgr._quota.record(name)
-                    if stream:
-                        req = mgr._client.build_request("POST", url, content=fwd_bytes, headers=fwd_headers)
-                        resp = await mgr._client.send(req, stream=True)
-                    else:
-                        resp = await mgr._client.post(url, content=fwd_bytes, headers=fwd_headers)
-
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 60))
-                    mgr._quota.record_429(name, retry_after)
-                    last_error = f"{name}: 429"
-                    continue
-
-                if not (200 <= resp.status_code < 300):
-                    logger.warning(f"[router] {name} returned {resp.status_code}")
-                    last_error = f"{name}: HTTP {resp.status_code}"
-                    if 400 <= resp.status_code < 500:
-                        return JSONResponse(status_code=resp.status_code, content=resp.json())
-                    continue
-
-                logger.info(f"[router] served by {name} (task_type={task_type}, phase={phase}, vision={is_vision}, format=anthropic)")
-
-                if stream:
-                    return SR(
-                        _stream_anthropic(resp, name),
-                        media_type="text/event-stream",
-                        headers={"X-Backend": name},
-                    )
-
-                return JSONResponse(content=resp.json(), headers={"X-Backend": name})
-
-            except _httpx.TimeoutException:
-                logger.warning(f"[router] {name} timed out")
-                last_error = f"{name}: timeout"
-            except Exception as e:
-                logger.warning(f"[router] {name} error: {e}")
-                last_error = f"{name}: {e}"
-
-        return JSONResponse(status_code=502, content={"error": f"All backends failed: {last_error}"})
+        mgr = app.state.backend_manager
+        try:
+            result = await handle_chat(mgr, parsed)
+        except Exception as e:
+            logger.exception("handle_chat failed")
+            return JSONResponse(status_code=500, content={"error": {"message": str(e), "type": "internal_error"}})
+        return JSONResponse(content=result)
 
     return app
 
 
-def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    config_path = os.environ.get("SHRIMP_ROUTER_CONFIG", "config.yaml")
-    config = load_config(config_path)
-    listen = config.get("listen", {}) if isinstance(config.get("listen"), dict) else {}
-    host = listen.get("host", "127.0.0.1")
-    port = int(listen.get("port", 8090))
-    logger.info(f"Starting shrimp-router on {host}:{port}")
-    uvicorn.run(create_app(config), host=host, port=port)
-
-
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Shrimp Router")
+    parser.add_argument("--config", default="config.yaml", help="Path to config YAML")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    cfg = load_config(args.config)
+    application = create_app(cfg)
+    uvicorn.run(application, host=args.host, port=args.port)
