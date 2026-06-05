@@ -122,6 +122,66 @@ routing:
 
 See `config.example.yaml` for the full example with all backends and task types.
 
+## swarm-controller integration
+
+shrimp-router is designed to be the LLM gateway for [swarm-controller](https://github.com/paraxenia/swarm-controller). Agents send all LLM calls to it via `X-Task-Type` and `X-Phase` headers so routing, quota, and fallback are handled centrally.
+
+### Setup
+
+```bash
+# Clone alongside swarm-controller
+git clone https://github.com/paraxenia/shrimp-router.git ~/workspace/shrimp-router
+cd ~/workspace/shrimp-router
+python3 -m venv .venv && .venv/bin/pip install -e .
+cp config.example.yaml config.yaml   # then edit with your API keys
+```
+
+In swarm-controller `.env`:
+```bash
+MINIMAX_API_KEY=sk-...
+KIMI_API_KEY=sk-...
+OPENCODE_API_KEY=sk-...
+OPENAI_API_KEY=sk-...    # same as OPENCODE_API_KEY — required by headroom
+```
+
+In swarm-controller `config.json`, point the minimax provider at the router:
+```json
+{
+  "llm_providers": {
+    "minimax": {
+      "base_url": "http://localhost:8090/v1",
+      "model": "MiniMax-M3"
+    }
+  }
+}
+```
+
+`launch.sh` in swarm-controller will start shrimp-router automatically if it finds it at `~/workspace/shrimp-router` (override with `SHRIMP_ROUTER_DIR`).
+
+### Phase pipeline routing
+
+The swarm sends `X-Phase` headers to route different pipeline phases to different models:
+
+```
+X-Phase: plan    → opencode-plan  (Kimi K2.6 — best agentic reasoning)
+X-Phase: scout   → opencode-scout (DeepSeek V4 Flash — cheap, 1M ctx)
+X-Phase: work    → minimax        (MiniMax M3 — proven for implementation)
+```
+
+Configure in `config.yaml`:
+```yaml
+routing:
+  phase_backends:
+    plan:   [opencode-plan, minimax]
+    scout:  [opencode-scout, minimax]
+    work:   [minimax]
+  task_type_backends:
+    bug:      [kimi, opencode-plan, minimax]
+    feature:  [minimax, opencode-plan, kimi]
+    research: [opencode-scout, minimax]
+    qa:       [minimax]
+```
+
 ## Task-type routing
 
 Add an `X-Task-Type` header and the router picks the preferred backend:
