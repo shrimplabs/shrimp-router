@@ -124,13 +124,13 @@ See `config.example.yaml` for the full example with all backends and task types.
 
 ## swarm-controller integration
 
-shrimp-router is designed to be the LLM gateway for [swarm-controller](https://github.com/paraxenia/swarm-controller). Agents send all LLM calls to it via `X-Task-Type` and `X-Phase` headers so routing, quota, and fallback are handled centrally.
+shrimp-router is designed to be the LLM gateway for [swarm-controller](https://github.com/shrimplabs/swarm-controller). Agents send all LLM calls to it via `X-Task-Type` and `X-Phase` headers so routing, quota, and fallback are handled centrally.
 
 ### Setup
 
 ```bash
 # Clone alongside swarm-controller
-git clone https://github.com/paraxenia/shrimp-router.git ~/workspace/shrimp-router
+git clone https://github.com/shrimplabs/shrimp-router.git ~/workspace/shrimp-router
 cd ~/workspace/shrimp-router
 python3 -m venv .venv && .venv/bin/pip install -e .
 cp config.example.yaml config.yaml   # then edit with your API keys
