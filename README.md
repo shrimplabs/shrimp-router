@@ -168,6 +168,93 @@ curl http://localhost:8090/health
 | `scripts/start-cluster.sh` | Main Mac | SSHs into all nodes, starts servers, health-checks after 15s |
 | `scripts/start-router.sh` | Main Mac | Starts the gateway on `:8090` |
 
+## Backend wire formats
+
+Each backend has two format fields that control how requests and responses are translated:
+
+| Field | Values | Default | Purpose |
+|-------|--------|---------|---------|
+| `format` | `anthropic`, `openai` | `anthropic` | Wire format the backend **expects** for requests |
+| `response_format` | `anthropic`, `openai`, `auto` | `auto` | Format the backend **returns** in responses |
+
+`auto` means the router infers from `format`: openai backends return OpenAI responses, anthropic backends return Anthropic responses.
+
+The `/v1/chat/completions` endpoint always returns OpenAI format to callers. The `/v1/messages` endpoint always returns Anthropic format. Translation happens automatically based on these fields.
+
+**Example: OpenCode Go (OpenAI-compatible backend behind Anthropic caller)**
+```yaml
+opencode:
+  base_url: "http://localhost:8886/v1"   # headroom proxy
+  models: ["kimi-k2"]
+  format: "openai"           # send OpenAI /chat/completions
+  response_format: "openai"  # backend returns OpenAI format
+  auth_env: "OPENCODE_API_KEY"
+```
+
+> **Note for OpenCode Go users**: headroom's `anyllm/openai` backend reads `OPENAI_API_KEY`,
+> not `OPENCODE_API_KEY`. Set both in your `.env`:
+> ```bash
+> OPENCODE_API_KEY=sk-...
+> OPENAI_API_KEY=sk-...   # same value — required alias for headroom
+> ```
+> Or in your `launch.sh`: `OPENAI_API_KEY="$OPENCODE_API_KEY" headroom proxy ...`
+
+## Circuit breakers
+
+Each backend can have an independent circuit breaker to avoid hammering a down provider:
+
+```yaml
+backends:
+  minimax:
+    base_url: "https://api.minimax.chat/v1"
+    models: ["MiniMax-M3"]
+    circuit_breaker:
+      failure_threshold: 3   # trip after 3 consecutive failures
+      cooldown_seconds: 60   # stay open for 60s, then probe
+```
+
+When a breaker trips, the backend is skipped for `cooldown_seconds`. After cooldown, one probe request is allowed through — success closes the breaker, failure restarts the cooldown.
+
+Circuit breaker state is visible in `/health`:
+```json
+{
+  "circuit_breakers": {
+    "minimax": {"state": "closed", "failure_count": 0}
+  }
+}
+```
+
+## Health check timeout
+
+```yaml
+backends:
+  slow-backend:
+    base_url: "http://remote:8080/v1"
+    health_check_timeout_seconds: 5.0   # default: 3.0
+```
+
+## Using headroom as a caching/token proxy
+
+[headroom](https://github.com/headroom-ai/headroom) sits between shrimp-router and upstream APIs to provide prompt caching, token tracking, and rate limit smoothing:
+
+```
+agents → shrimp-router :8090 → headroom :8888 → MiniMax API
+                              → headroom :8886 → OpenCode Go
+```
+
+In `config.yaml`, point backends at headroom instead of the upstream URL:
+```yaml
+backends:
+  minimax:
+    base_url: "http://localhost:8888/v1"   # headroom, not api.minimax.chat
+    format: "anthropic"
+
+  opencode-plan:
+    base_url: "http://localhost:8886/v1"   # headroom openai proxy
+    format: "openai"
+    auth_env: "OPENCODE_API_KEY"
+```
+
 ## Environment variables
 
 | Variable | Purpose |
@@ -175,6 +262,7 @@ curl http://localhost:8090/health
 | `MINIMAX_API_KEY` | MiniMax auth |
 | `KIMI_API_KEY` | Kimi auth |
 | `OPENCODE_API_KEY` | OpenCode Go auth |
+| `OPENAI_API_KEY` | Required alias for headroom's anyllm/openai backend (set to same value as `OPENCODE_API_KEY`) |
 | `OPENROUTER_API_KEY` | OpenRouter auth (pay-per-use fallback) |
 | `SHRIMP_ROUTER_CONFIG` | Path to config.yaml (default: `./config.yaml`) |
 | `M4_1_HOST` | Hostname for first M4 mini (default: `m4-1.local`) |

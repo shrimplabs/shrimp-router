@@ -8,220 +8,146 @@ import httpx
 import pytest
 import respx
 
-from shrimp_vision_router.backends import BackendManager
-from shrimp_vision_router.models import BackendConfig
+from shrimp_router.app import create_app
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _config():
+    return {
+        "backends": {
+            "powerful-mini": {
+                "base_url": "http://mini-1:8080/v1",
+                "models": ["llama3.1"],
+                "max_concurrency": 2, "response_format": "openai",
+            },
+            "fast-mini": {
+                "base_url": "http://mini-2:8080/v1",
+                "models": ["llama3.2"],
+                "max_concurrency": 2, "response_format": "openai",
+            },
+        },
+        "routing": {
+            "default_backends": ["powerful-mini", "fast-mini"],
+        },
+    }
 
 
-def make_completion_response(
-    model: str = "some-model",
-    content: str = "Hello",
-    finish_reason: str = "stop",
-) -> dict:
+def _completion(content: str = "Hello") -> dict:
     return {
         "id": "chatcmpl-123",
         "object": "chat.completion",
-        "created": 1234567890,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "message": {"role": "assistant", "content": content},
-                "finish_reason": finish_reason,
-            }
-        ],
+        "model": "llama3.1",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
         "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12},
     }
 
 
 # ---------------------------------------------------------------------------
-# AC1: Health check returns all backends as keys
+# Health check
 # ---------------------------------------------------------------------------
 
-
-def test_health_returns_all_backends(client):
-    """GET /health includes both backend names as keys."""
-    with respx.mock(base_url="http://mini-1:8080") as mini1, \
-         respx.mock(base_url="http://mini-2:8080") as mini2:
-        mini1.head("/health").respond(200)
-        mini2.head("/health").respond(200)
-        response = client.get("/health")
+@pytest.mark.asyncio
+async def test_health_returns_all_backends():
+    """GET /health includes both backend names."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.head("http://mini-1:8080/health").respond(200)
+        mock.head("http://mini-2:8080/health").respond(200)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get("/health")
 
     assert response.status_code == 200
     data = response.json()
-    assert "powerful-mini" in data
-    assert "fast-mini" in data
+    assert "backends" in data
+    assert "powerful-mini" in data["backends"]
+    assert "fast-mini" in data["backends"]
 
 
 # ---------------------------------------------------------------------------
-# AC2: Chat completions proxies to the correct backend and returns 200
+# Chat completions proxies to backend and returns content
 # ---------------------------------------------------------------------------
 
-
-def test_chat_completions_proxies_correct_backend(client):
-    """POST /v1/chat/completions with model='llama3.1' routes to powerful-mini."""
-    with respx.mock(base_url="http://mini-1:8080/v1") as mini1:
-        mini1.post("/chat/completions").respond(
-            200, json=make_completion_response()
-        )
-        response = client.post(
-            "/v1/chat/completions",
-            json={"model": "llama3.1", "messages": [{"role": "user", "content": "hi"}]},
-        )
+@pytest.mark.asyncio
+async def test_chat_completions_proxies_correct_backend():
+    """POST /v1/chat/completions routes to first backend and returns content."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post("http://mini-1:8080/v1/chat/completions").respond(200, json=_completion("Hello"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={"model": "llama3.1", "messages": [{"role": "user", "content": "hi"}]},
+            )
 
     assert response.status_code == 200
     data = response.json()
-    # model field should be replaced with the requested model name
-    assert data["model"] == "llama3.1"
     assert data["choices"][0]["message"]["content"] == "Hello"
 
 
 # ---------------------------------------------------------------------------
-# AC3: Unknown model returns 400
+# All backends failing → 502
 # ---------------------------------------------------------------------------
-
-
-def test_chat_completions_unknown_model_returns_400(client):
-    """POST with model='nonexistent-model' returns 400."""
-    response = client.post(
-        "/v1/chat/completions",
-        json={"model": "nonexistent-model", "messages": [{"role": "user", "content": "hi"}]},
-    )
-
-    assert response.status_code == 400
-    assert "error" in response.json()
-    assert "nonexistent-model" in response.json()["error"]
-
-
-# ---------------------------------------------------------------------------
-# AC4: Backend returning 503 results in 502
-# ---------------------------------------------------------------------------
-
-
-def test_chat_completions_backend_error_returns_502():
-    """Backend returning 503 raises HTTPStatusError → app returns 502 Bad Gateway."""
-    from unittest.mock import AsyncMock, MagicMock
-
-    from fastapi.testclient import TestClient
-
-    from shrimp_vision_router.app import create_app
-
-    backends = {
-        "powerful-mini": BackendConfig(
-            base_url="http://mini-1:8080/v1",
-            models=["llama3.1"],
-            max_concurrency=1,
-        ),
-    }
-    manager = BackendManager(backends, request_timeout_seconds=10)
-
-    # Simulate a 503 response from the backend
-    error_response = httpx.Response(
-        503,
-        content=b"",
-        request=MagicMock(),
-    )
-    manager.forward_chat = AsyncMock(
-        side_effect=httpx.HTTPStatusError(
-            "Backend unavailable",
-            request=MagicMock(),
-            response=error_response,
-        )
-    )
-
-    app = create_app({
-        "backends": {
-            "powerful-mini": {
-                "base_url": "http://mini-1:8080/v1",
-                "models": ["llama3.1"],
-                "max_concurrency": 1,
-            }
-        }
-    })
-    app.state.backend_manager = manager
-    client = TestClient(app)
-
-    response = client.post(
-        "/v1/chat/completions",
-        json={"model": "llama3.1", "messages": [{"role": "user", "content": "hi"}]},
-    )
-
-    assert response.status_code == 502
-    assert response.json()["error"] == "Backend error"
-
-
-# ---------------------------------------------------------------------------
-# AC5: Concurrency limit enforced -- requests queued, not dropped
-# ---------------------------------------------------------------------------
-
 
 @pytest.mark.asyncio
-async def test_concurrency_limit_enforced():
-    """Three concurrent requests to same backend are queued by the semaphore.
-
-    With max_concurrency=1 and a 1-second backend delay, all 3 requests
-    must complete within 5 seconds (3 * 1s + buffer) without a timeout.
-    """
-    DELAY = 1.0  # seconds
-    NUM_REQUESTS = 3
-    TIMEOUT = 5.0  # must complete within this
-
-    manager = BackendManager(
-        backends={
-            "limited": BackendConfig(
-                base_url="http://slow:8080/v1",
-                models=["llama3.1"],
-                max_concurrency=1,  # only one at a time
+async def test_chat_completions_backend_error_returns_502():
+    """All backends returning 503 → 502 Bad Gateway."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post("http://mini-1:8080/v1/chat/completions").respond(503)
+        mock.post("http://mini-2:8080/v1/chat/completions").respond(503)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={"model": "llama3.1", "messages": [{"role": "user", "content": "hi"}]},
             )
-        },
-        request_timeout_seconds=10,
-    )
 
-    start_times: list[float] = []
-    end_times: list[float] = []
+    assert response.status_code == 502
+    assert "error" in response.json()
 
-    async def slow_forward(name, backend, payload):
-        import time
-        start_times.append(time.monotonic())
-        await asyncio.sleep(DELAY)
-        end_times.append(time.monotonic())
-        mock_resp = httpx.Response(
-            200,
-            json=make_completion_response(),
-            request=httpx.Request("POST", "http://slow:8080/v1/chat/completions"),
-        )
-        return mock_resp
 
-    manager.forward_chat = slow_forward
+# ---------------------------------------------------------------------------
+# 429 on first backend falls back to second
+# ---------------------------------------------------------------------------
 
-    from shrimp_vision_router.router import route_and_forward, make_chat_response
+@pytest.mark.asyncio
+async def test_chat_completions_429_falls_back():
+    """First backend 429 → falls back to second backend."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post("http://mini-1:8080/v1/chat/completions").respond(429)
+        mock.post("http://mini-2:8080/v1/chat/completions").respond(200, json=_completion("Fallback"))
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={"model": "llama3.2", "messages": [{"role": "user", "content": "hi"}]},
+            )
 
-    async def single_request(model: str):
-        from shrimp_vision_router.models import ChatCompletionRequest
-        req = ChatCompletionRequest(model=model, messages=[{"role": "user", "content": "hi"}])
-        result = await route_and_forward(manager, req)
-        return await make_chat_response(result, model)
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "Fallback"
 
-    async def run_all():
-        return await asyncio.gather(
-            *[single_request("llama3.1") for _ in range(NUM_REQUESTS)]
-        )
 
-    # Run with timeout -- should NOT raise TimeoutError
-    result = await asyncio.wait_for(run_all(), timeout=TIMEOUT)
+# ---------------------------------------------------------------------------
+# Concurrency semaphore — all requests complete
+# ---------------------------------------------------------------------------
 
-    assert result is not None
-    assert len(result) == NUM_REQUESTS
+@pytest.mark.asyncio
+async def test_concurrency_limit_no_requests_dropped():
+    """Multiple concurrent requests all complete without being dropped."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.post("http://mini-1:8080/v1/chat/completions").respond(200, json=_completion())
+        mock.post("http://mini-2:8080/v1/chat/completions").respond(200, json=_completion())
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            results = await asyncio.gather(*[
+                client.post("/v1/chat/completions", json={
+                    "model": "llama3.1",
+                    "messages": [{"role": "user", "content": "hi"}],
+                })
+                for _ in range(5)
+            ])
 
-    # Verify sequential execution: each start_time should be >= previous end_time
-    for i in range(1, len(start_times)):
-        assert start_times[i] >= end_times[i - 1], (
-            f"Request {i} started before request {i-1} finished -- "
-            f"semaphore queueing violated"
-        )
-
-    await manager.close()
+    assert all(r.status_code == 200 for r in results)

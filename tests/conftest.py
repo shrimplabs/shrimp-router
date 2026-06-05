@@ -5,32 +5,35 @@ from __future__ import annotations
 import pytest
 import respx
 
-from shrimp_router.backends import BackendManager
-from shrimp_router.models import BackendConfig
+from shrimp_router.models import RouterConfig
 
 
 @pytest.fixture
-def backend_manager() -> BackendManager:
-    """BackendManager with two mock backends, no real HTTP."""
-    backends = {
-        "powerful-mini": BackendConfig(
-            base_url="http://mini-1:8080/v1",
-            models=["llama3.1"],
-            max_concurrency=1,
-        ),
-        "fast-mini": BackendConfig(
-            base_url="http://mini-2:8080/v1",
-            models=["llama3.2"],
-            max_concurrency=1,
-        ),
-    }
-    return BackendManager(backends, request_timeout_seconds=10)
+def router_config() -> RouterConfig:
+    """RouterConfig with two mock backends."""
+    return RouterConfig.model_validate({
+        "backends": {
+            "powerful-mini": {
+                "base_url": "http://mini-1:8080/v1",
+                "models": ["llama3.1"],
+                "max_concurrency": 1,
+            },
+            "fast-mini": {
+                "base_url": "http://mini-2:8080/v1",
+                "models": ["llama3.2"],
+                "max_concurrency": 1,
+            },
+        },
+        "routing": {
+            "default_backends": ["powerful-mini", "fast-mini"],
+        },
+    })
 
 
 @pytest.fixture
-def app_with_mocked_backends(backend_manager):
+def app_with_mocked_backends():
     """Create app with real backend_manager but all HTTP mocked via respx."""
-    from shrimp_vision_router.app import create_app
+    from shrimp_router.app import create_app
 
     config = {
         "backends": {
@@ -44,11 +47,12 @@ def app_with_mocked_backends(backend_manager):
                 "models": ["llama3.2"],
                 "max_concurrency": 1,
             },
-        }
+        },
+        "routing": {
+            "default_backends": ["powerful-mini", "fast-mini"],
+        },
     }
-    app = create_app(config)
-    app.state.backend_manager = backend_manager
-    return app
+    return create_app(config)
 
 
 @pytest.fixture
