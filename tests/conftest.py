@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import respx
 
-from shrimp_vision_router.backends import BackendManager
-from shrimp_vision_router.models import BackendConfig
+from shrimp_router.backends import BackendManager
+from shrimp_router.models import BackendConfig
 
 
 @pytest.fixture
