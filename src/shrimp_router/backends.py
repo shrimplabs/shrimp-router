@@ -8,6 +8,7 @@ import time
 
 import httpx
 
+from .circuit_breaker import CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError
 from .models import BackendConfig, RouterConfig
 from .quota import QuotaRegistry
 
@@ -43,7 +44,7 @@ class BackendManager:
         )
         self._semaphores: dict[str, asyncio.Semaphore] = {}
         self._quota = QuotaRegistry()
-        self._health: dict[str, float] = {}  # name → last_healthy timestamp
+        self._health: dict[str, float] = {}  # name -> last_healthy timestamp
 
         # Build VLM pool
         vision_names = config.routing.vision_backends or [
@@ -55,6 +56,16 @@ class BackendManager:
         for name, backend in config.backends.items():
             if backend.quota:
                 self._quota.register(name, backend.quota.window_seconds, backend.quota.max_requests)
+
+        # Build circuit breaker registry (only for backends with config)
+        self._cb_registry = CircuitBreakerRegistry()
+        for name, backend in config.backends.items():
+            if backend.circuit_breaker:
+                cb_cfg = {
+                    "failure_threshold": backend.circuit_breaker.failure_threshold,
+                    "cooldown_seconds": backend.circuit_breaker.cooldown_seconds,
+                }
+                self._cb_registry.register(name, cb_cfg)
 
     def _semaphore(self, name: str) -> asyncio.Semaphore:
         if name not in self._semaphores:
@@ -71,6 +82,10 @@ class BackendManager:
         if key:
             return {"Authorization": f"Bearer {key}"}
         return {}
+
+    def circuit_breaker(self, name: str) -> CircuitBreaker | None:
+        """Return the circuit breaker for a backend, or None if not configured."""
+        return self._cb_registry.get(name)
 
     async def pick_backends(
         self,
@@ -113,7 +128,7 @@ class BackendManager:
         for name in candidates:
             if name in self.backends and self._quota.has_capacity(name):
                 return name
-        # All rate-limited — return first anyway (let it 429 and we'll record it)
+        # All rate-limited -- return first anyway (let it 429 and we'll record it)
         return candidates[0] if candidates else None
 
     async def health_check(self, name: str, timeout: float = 3.0) -> bool:
@@ -145,7 +160,7 @@ class BackendManager:
         async with self._semaphore(name):
             self._quota.record(name)
             if stream:
-                # Return the response without reading body — caller streams it
+                # Return the response without reading body -- caller streams it
                 req = self._client.build_request("POST", url, json=payload, headers=headers)
                 resp = await self._client.send(req, stream=True)
             else:
@@ -159,6 +174,10 @@ class BackendManager:
 
     def quota_stats(self) -> dict:
         return self._quota.stats()
+
+    def circuit_breaker_stats(self) -> dict:
+        """Return circuit breaker status for all registered backends."""
+        return self._cb_registry.status_all()
 
     async def close(self) -> None:
         await self._client.aclose()

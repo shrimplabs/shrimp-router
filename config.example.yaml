@@ -15,6 +15,10 @@ backends:
     quota:
       window_seconds: 18000   # 5 hours
       max_requests: 3000
+    # Circuit breaker: open after 5 consecutive failures, wait 30s before probing
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
 
   kimi:
     base_url: "https://api.moonshot.cn/v1"
@@ -40,7 +44,7 @@ backends:
 
   openrouter:
     base_url: "https://openrouter.ai/api/v1"
-    # Pay-per-use — use cheap models to stretch $9 as far as possible
+    # Pay-per-use -- use cheap models to stretch $9 as far as possible
     # deepseek/deepseek-chat: ~$0.27/1M tokens (great for bug/research)
     # qwen/qwen-2.5-72b-instruct: ~$0.35/1M tokens (solid for features)
     # anthropic/claude-3-haiku: ~$0.25/1M tokens (fast, reliable fallback)
@@ -49,7 +53,7 @@ backends:
     weight: 1
     tags: ["text"]
     auth_env: "OPENROUTER_API_KEY"
-    # No quota block — pay-per-use, router will use it only as last fallback
+    # No quota block -- pay-per-use, router will use it only as last fallback
 
   # Local VLM nodes
   vlm-m4-1:
@@ -92,7 +96,7 @@ routing:
     - vlm-m4-2
     - vlm-3070
 
-  # Default text routing — MiniMax first, then Kimi, OpenCode, OpenRouter as last resort
+  # Default text routing -- MiniMax first, then Kimi, OpenCode, OpenRouter as last resort
   default_backends:
     - minimax
     - kimi
