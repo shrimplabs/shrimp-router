@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 import uvicorn
 import yaml
@@ -13,12 +15,23 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .backends import BackendManager
+from .format_normalizer import openai_to_anthropic_response
 from .models import ChatCompletionRequest, RouterConfig
 from .quota import MinimaxQuotaPoller
 from .router import handle_chat, _stream_response as _stream_anthropic
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    try:
+        yield
+    finally:
+        for poller in app.state.quota_pollers:
+            poller.stop()
+        if app.state.backend_manager:
+            await app.state.backend_manager.close()
 
 
 def _anthropic_to_openai(payload: dict, model: str) -> dict:
@@ -79,7 +92,7 @@ def load_config(path: str | os.PathLike[str]) -> dict:
 
 
 def create_app(config: dict | None = None) -> FastAPI:
-    app = FastAPI(title="Shrimp Router", version="0.2.0")
+    app = FastAPI(title="Shrimp Router", version="0.2.0", lifespan=_lifespan)
     cfg = config or {}
     app.state.config = cfg
 
@@ -102,13 +115,6 @@ def create_app(config: dict | None = None) -> FastAPI:
     else:
         app.state.backend_manager = None
 
-    @app.on_event("shutdown")
-    async def _shutdown():
-        for poller in app.state.quota_pollers:
-            poller.stop()
-        if app.state.backend_manager:
-            await app.state.backend_manager.close()
-
     @app.get("/health")
     async def health():
         mgr = app.state.backend_manager
@@ -118,7 +124,19 @@ def create_app(config: dict | None = None) -> FastAPI:
         for name in mgr.backends:
             results[name] = await mgr.health_check(name)
         quota = mgr.quota_stats()
-        return {"ok": True, "backends": results, "quota": quota}
+        return {
+            "ok": True,
+            "backends": results,
+            "quota": quota,
+            "circuit_breakers": mgr.circuit_breaker_stats(),
+        }
+
+    @app.get("/metrics")
+    async def metrics():
+        mgr = app.state.backend_manager
+        if mgr is None:
+            return {"backends": {}}
+        return {"backends": mgr.metrics()}
 
 
     @app.post("/v1/chat/completions")
@@ -200,13 +218,17 @@ def create_app(config: dict | None = None) -> FastAPI:
                     fwd_headers = {"Content-Type": "application/json", **mgr._auth_headers(name), **extra_headers}
                     url = f"{cfg.base_url.rstrip('/')}/messages"
 
+                # Acquire semaphore only long enough to send the request, then
+                # release immediately — prevents slow Kimi/DeepSeek responses
+                # from holding slots and starving the uvicorn event loop.
                 async with mgr._semaphore(name):
                     mgr._quota.record(name)
-                    if stream:
-                        req = mgr._client.build_request("POST", url, content=fwd_bytes, headers=fwd_headers)
-                        resp = await mgr._client.send(req, stream=True)
-                    else:
-                        resp = await mgr._client.post(url, content=fwd_bytes, headers=fwd_headers)
+                    req = mgr._client.build_request("POST", url, content=fwd_bytes, headers=fwd_headers)
+                    resp = await mgr._client.send(req, stream=True)
+                # Semaphore released — slot free for next request
+
+                if not stream:
+                    await resp.aread()
 
                 if resp.status_code == 429:
                     retry_after = float(resp.headers.get("Retry-After", 60))
@@ -230,9 +252,9 @@ def create_app(config: dict | None = None) -> FastAPI:
                     )
 
                 resp_json = resp.json()
-                if cfg.format == "openai":
+                if cfg.effective_response_format == "openai":
                     original_model = payload.get("model", cfg.models[0] if cfg.models else "")
-                    resp_json = _openai_to_anthropic(resp_json, original_model)
+                    resp_json = openai_to_anthropic_response(resp_json, original_model)
                 return JSONResponse(content=resp_json, headers={"X-Backend": name})
 
             except _httpx.TimeoutException:
