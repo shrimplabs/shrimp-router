@@ -44,7 +44,9 @@ class BackendConfig(BaseModel):
     circuit_breaker: CircuitBreakerConfig | None = None
     health_check_path: str = "/health"
     health_check_timeout_seconds: float = Field(default=5.0, gt=0)
-    format: str = "anthropic"  # "anthropic" or "openai" -- wire format this backend expects
+    health_check_interval_seconds: float = Field(default=30.0, gt=0)
+    format: str = "anthropic"  # wire format this backend expects: "anthropic" or "openai"
+    response_format: str = "auto"  # wire format this backend returns: "auto", "openai", or "anthropic"
 
     @field_validator("base_url")
     @classmethod
@@ -53,6 +55,28 @@ class BackendConfig(BaseModel):
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("base_url must be a valid HTTP/HTTPS URL")
         return v
+
+    @field_validator("format")
+    @classmethod
+    def format_must_be_valid(cls, v: str) -> str:
+        allowed = {"openai", "anthropic"}
+        if v not in allowed:
+            raise ValueError(f"format must be one of {allowed}, got '{v}'")
+        return v
+
+    @field_validator("response_format")
+    @classmethod
+    def response_format_must_be_valid(cls, v: str) -> str:
+        allowed = {"auto", "openai", "anthropic"}
+        if v not in allowed:
+            raise ValueError(f"response_format must be one of {allowed}, got '{v}'")
+        return v
+
+    @property
+    def effective_response_format(self) -> str:
+        if self.response_format == "auto":
+            return self.format
+        return self.response_format
 
     @property
     def api_key(self) -> str | None:

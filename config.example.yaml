@@ -1,5 +1,5 @@
 listen:
-  host: "0.0.0.0"
+  host: "127.0.0.1"  # change to "0.0.0.0" to bind on all interfaces (LAN/cluster)
   port: 8090
 
 request_timeout_seconds: 300
@@ -11,6 +11,8 @@ backends:
     max_concurrency: 8
     weight: 2
     tags: ["text", "vision"]
+    format: "openai"
+    response_format: "openai"
     auth_env: "MINIMAX_API_KEY"
     quota:
       window_seconds: 18000   # 5 hours
@@ -26,6 +28,8 @@ backends:
     max_concurrency: 6
     weight: 2
     tags: ["text"]
+    format: "openai"
+    response_format: "openai"
     auth_env: "KIMI_API_KEY"
     quota:
       window_seconds: 18000
@@ -37,6 +41,8 @@ backends:
     max_concurrency: 6
     weight: 1
     tags: ["text"]
+    format: "openai"
+    response_format: "openai"
     auth_env: "OPENCODE_API_KEY"
     quota:
       window_seconds: 18000
@@ -52,6 +58,8 @@ backends:
     max_concurrency: 4
     weight: 1
     tags: ["text"]
+    format: "openai"
+    response_format: "openai"
     auth_env: "OPENROUTER_API_KEY"
     # No quota block -- pay-per-use, router will use it only as last fallback
 
@@ -62,6 +70,8 @@ backends:
     max_concurrency: 2
     weight: 1
     tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
     health_check_path: "/health"
     health_check_timeout_seconds: 10  # slower model on this node, allow extra time
 
@@ -71,6 +81,8 @@ backends:
     max_concurrency: 2
     weight: 1
     tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
     health_check_path: "/health"
 
   vlm-3070:
@@ -79,6 +91,8 @@ backends:
     max_concurrency: 3
     weight: 2   # faster GPU throughput
     tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
     health_check_path: "/health"
 
 escalation:

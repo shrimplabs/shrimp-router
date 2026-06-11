@@ -4,6 +4,21 @@ version = "0.2.0"
 description = "Intelligent OpenAI-compatible gateway for LLM and VLM backends with quota tracking and task-type routing."
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Shrimp Labs" },
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: Proxy Servers",
+]
 dependencies = [
     "fastapi>=0.115",
     "httpx>=0.27",
@@ -21,6 +36,11 @@ dev = [
 
 [project.scripts]
 shrimp-router = "shrimp_router.app:main"
+
+[project.urls]
+Homepage = "https://github.com/shrimplabs/shrimp-router"
+Repository = "https://github.com/shrimplabs/shrimp-router"
+Issues = "https://github.com/shrimplabs/shrimp-router/issues"
 
 [build-system]
 requires = ["hatchling"]

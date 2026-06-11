@@ -17,12 +17,16 @@ def _config():
             "powerful-mini": {
                 "base_url": "http://mini-1:8080/v1",
                 "models": ["llama3.1"],
-                "max_concurrency": 2, "response_format": "openai",
+                "max_concurrency": 2,
+                "format": "openai",
+                "response_format": "openai",
             },
             "fast-mini": {
                 "base_url": "http://mini-2:8080/v1",
                 "models": ["llama3.2"],
-                "max_concurrency": 2, "response_format": "openai",
+                "max_concurrency": 2,
+                "format": "openai",
+                "response_format": "openai",
             },
         },
         "routing": {
@@ -51,8 +55,8 @@ async def test_health_returns_all_backends():
     app = create_app(_config())
     transport = httpx.ASGITransport(app=app)
     with respx.mock(assert_all_called=False) as mock:
-        mock.head("http://mini-1:8080/health").respond(200)
-        mock.head("http://mini-2:8080/health").respond(200)
+        mock.get("http://mini-1:8080/health").respond(200)
+        mock.get("http://mini-2:8080/health").respond(200)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             response = await client.get("/health")
 
@@ -61,6 +65,8 @@ async def test_health_returns_all_backends():
     assert "backends" in data
     assert "powerful-mini" in data["backends"]
     assert "fast-mini" in data["backends"]
+    assert data["backends"]["powerful-mini"] is True
+    assert "circuit_breakers" in data
 
 
 # ---------------------------------------------------------------------------
@@ -151,3 +157,32 @@ async def test_concurrency_limit_no_requests_dropped():
             ])
 
     assert all(r.status_code == 200 for r in results)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_translates_openai_backend_response():
+    """POST /v1/messages can call an OpenAI backend and return Anthropic shape."""
+    app = create_app(_config())
+    transport = httpx.ASGITransport(app=app)
+
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("http://mini-1:8080/v1/chat/completions").respond(
+            200,
+            json=_completion("Anthropic caller response"),
+        )
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/messages",
+                json={
+                    "model": "claude-compat",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert route.called
+    assert data["type"] == "message"
+    assert data["model"] == "claude-compat"
+    assert data["content"][0]["text"] == "Anthropic caller response"

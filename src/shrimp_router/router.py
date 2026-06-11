@@ -9,6 +9,7 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from .backends import BackendManager
+from .format_normalizer import anthropic_to_openai_response
 from .models import ChatCompletionRequest
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,12 @@ async def handle_chat(request: Request, body: ChatCompletionRequest) -> Streamin
             )
 
         data = resp.json()
+
+        # Normalize Anthropic-shaped response to OpenAI format if needed
+        cfg = manager.backends.get(name)
+        if cfg and cfg.effective_response_format == "anthropic":
+            data = anthropic_to_openai_response(data, body.model)
+
         data["model"] = body.model
         data["_backend"] = name
         return data

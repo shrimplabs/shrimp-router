@@ -35,7 +35,8 @@ agents / swarm-controller
 
 **On each M4 Mac Mini:**
 ```bash
-git clone git@github.com:shrimplabs/shrimp-router.git
+git clone https://github.com/shrimplabs/shrimp-router.git
+cd shrimp-router
 ./scripts/start-vlm-apple.sh
 ```
 
@@ -60,7 +61,7 @@ SSHs into all three nodes, starts their servers, waits 15s, health-checks each o
 ./scripts/start-router.sh
 ```
 
-First run copies `config.example.yaml` → `config.yaml`. Edit with your hostnames and API keys, then run again.
+First run copies `config.example.yaml` → `config.yaml`. Edit hostnames and model lists in `config.yaml`, then set API keys as environment variables (see [Environment variables](#environment-variables)), and run again.
 
 ### 4. Point your agents at the router
 
@@ -85,13 +86,15 @@ Copy `config.example.yaml` to `config.yaml` and edit:
 
 ```yaml
 listen:
-  host: "0.0.0.0"
+  host: "127.0.0.1"  # change to "0.0.0.0" to bind on all interfaces (LAN/cluster)
   port: 8090
 
 backends:
   minimax:
     base_url: "https://api.minimax.chat/v1"
     models: ["MiniMax-M3"]
+    format: "openai"
+    response_format: "openai"
     auth_env: "MINIMAX_API_KEY"      # reads key from environment variable
     weight: 2
     tags: ["text"]
@@ -102,12 +105,16 @@ backends:
   vlm-m4-1:
     base_url: "http://m4-1.local:8081/v1"
     models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    format: "openai"
+    response_format: "openai"
     tags: ["vision", "vlm"]
     weight: 1
 
   vlm-3070:
     base_url: "http://3070.local:11434/v1"
     models: ["Qwen2.5-VL-7B-Instruct-4bit"]
+    format: "openai"
+    response_format: "openai"
     tags: ["vision", "vlm"]
     weight: 2                        # 3070 gets 2x traffic share
 
@@ -133,15 +140,15 @@ shrimp-router is designed to be the LLM gateway for [swarm-controller](https://g
 git clone https://github.com/shrimplabs/shrimp-router.git ~/workspace/shrimp-router
 cd ~/workspace/shrimp-router
 python3 -m venv .venv && .venv/bin/pip install -e .
-cp config.example.yaml config.yaml   # then edit with your API keys
+cp config.example.yaml config.yaml   # then edit hostnames/models; set API keys as env vars
 ```
 
 In swarm-controller `.env`:
 ```bash
-MINIMAX_API_KEY=sk-...
-KIMI_API_KEY=sk-...
-OPENCODE_API_KEY=sk-...
-OPENAI_API_KEY=sk-...    # same as OPENCODE_API_KEY — required by headroom
+MINIMAX_API_KEY=<your-minimax-key>
+KIMI_API_KEY=<your-kimi-key>
+OPENCODE_API_KEY=<your-opencode-key>
+OPENAI_API_KEY=<your-opencode-key>    # same as OPENCODE_API_KEY — required by headroom
 ```
 
 In swarm-controller `config.json`, point the minimax provider at the router:
@@ -212,6 +219,7 @@ curl http://localhost:8090/health
 {
   "ok": true,
   "backends": {"minimax": true, "kimi": true},
+  "circuit_breakers": {},
   "quota": {
     "minimax": {"used": 1240, "remaining": 1760, "rate_limited": false},
     "kimi":    {"used": 430,  "remaining": 1570, "rate_limited": false}
@@ -254,8 +262,8 @@ opencode:
 > **Note for OpenCode Go users**: headroom's `anyllm/openai` backend reads `OPENAI_API_KEY`,
 > not `OPENCODE_API_KEY`. Set both in your `.env`:
 > ```bash
-> OPENCODE_API_KEY=sk-...
-> OPENAI_API_KEY=sk-...   # same value — required alias for headroom
+> OPENCODE_API_KEY=<your-opencode-key>
+> OPENAI_API_KEY=<your-opencode-key>   # same value — required alias for headroom
 > ```
 > Or in your `launch.sh`: `OPENAI_API_KEY="$OPENCODE_API_KEY" headroom proxy ...`
 
@@ -284,13 +292,18 @@ Circuit breaker state is visible in `/health`:
 }
 ```
 
+Metrics are available at:
+```bash
+curl http://localhost:8090/metrics
+```
+
 ## Health check timeout
 
 ```yaml
 backends:
   slow-backend:
     base_url: "http://remote:8080/v1"
-    health_check_timeout_seconds: 5.0   # default: 3.0
+    health_check_timeout_seconds: 5.0   # default: 5.0
 ```
 
 ## Using headroom as a caching/token proxy
@@ -329,3 +342,7 @@ backends:
 | `M4_2_HOST` | Hostname for second M4 mini (default: `m4-2.local`) |
 | `PC_3070_HOST` | Hostname for 3070 PC (default: `3070.local`) |
 | `VLM_SSH_USER` | SSH username for cluster script (default: current user) |
+
+## License
+
+MIT
