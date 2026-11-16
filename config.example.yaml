@@ -1,0 +1,149 @@
+listen:
+  host: "127.0.0.1"  # change to "0.0.0.0" to bind on all interfaces (LAN/cluster)
+  port: 8090
+
+request_timeout_seconds: 300
+
+backends:
+  minimax:
+    base_url: "https://api.minimax.chat/v1"
+    models: ["MiniMax-M3.1-Flash", "MiniMax-M3", "MiniMax-M2.7"]
+    max_concurrency: 8
+    weight: 2
+    tags: ["text", "vision"]
+    format: "openai"
+    response_format: "openai"
+    auth_env: "MINIMAX_API_KEY"
+    quota:
+      window_seconds: 18000   # 5 hours
+      max_requests: 3000
+    # Circuit breaker: open after 5 consecutive failures, wait 30s before probing
+    circuit_breaker:
+      failure_threshold: 5
+      cooldown_seconds: 30
+
+  kimi:
+    base_url: "https://api.moonshot.cn/v1"
+    models: ["k2p5", "kimi-k2", "moonshot-v1-8k"]
+    max_concurrency: 6
+    weight: 2
+    tags: ["text"]
+    format: "openai"
+    response_format: "openai"
+    auth_env: "KIMI_API_KEY"
+    quota:
+      window_seconds: 18000
+      max_requests: 2000
+
+  opencode:
+    base_url: "https://api.opencode.ai/v1"
+    models: ["MiniMax-M3", "kimi-k2", "qwen-3.7-max", "deepseek-v4-flash", "deepseek-v4-pro"]
+    max_concurrency: 6
+    weight: 1
+    tags: ["text"]
+    format: "openai"
+    response_format: "openai"
+    auth_env: "OPENCODE_API_KEY"
+    quota:
+      window_seconds: 18000
+      max_requests: 1500
+
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    # Pay-per-use -- use cheap models to stretch $9 as far as possible
+    # deepseek/deepseek-chat: ~$0.27/1M tokens (great for bug/research)
+    # qwen/qwen-2.5-72b-instruct: ~$0.35/1M tokens (solid for features)
+    # anthropic/claude-3-haiku: ~$0.25/1M tokens (fast, reliable fallback)
+    models: ["deepseek/deepseek-chat", "qwen/qwen-2.5-72b-instruct", "anthropic/claude-3-haiku"]
+    max_concurrency: 4
+    weight: 1
+    tags: ["text"]
+    format: "openai"
+    response_format: "openai"
+    auth_env: "OPENROUTER_API_KEY"
+    # No quota block -- pay-per-use, router will use it only as last fallback
+
+  # Local VLM nodes
+  vlm-m4-1:
+    base_url: "http://m4-1.local:8081/v1"
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
+    max_concurrency: 2
+    weight: 1
+    tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
+    health_check_path: "/health"
+    health_check_timeout_seconds: 10  # slower model on this node, allow extra time
+
+  vlm-m4-2:
+    base_url: "http://m4-2.local:8081/v1"
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
+    max_concurrency: 2
+    weight: 1
+    tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
+    health_check_path: "/health"
+
+  vlm-3070:
+    base_url: "http://3070.local:11434/v1"
+    models: ["Qwen3-VL-8B-Instruct-6bit"]
+    max_concurrency: 3
+    weight: 2   # faster GPU throughput
+    tags: ["vision", "vlm"]
+    format: "openai"
+    response_format: "openai"
+    health_check_path: "/health"
+
+  # ---- Adaptive routing example (optional) ---------------------------
+  # Uncomment the `athena` block below to enable adaptive routing. Athena is a
+  # local cheap backend used for read-only tool turns; the strong backends
+  # above handle write/strong turns. See ADAPTIVE_ROUTING_PLAN.md for the
+  # full design.
+  #
+  # athena:
+  #   base_url: "http://gpu-box.local:8083/v1"
+  #   models: ["qwen3.6-35b-a3b-fast-256k"]
+  #   max_concurrency: 8
+  #   weight: 1
+  #   tags: ["cheap", "local", "adaptive", "text"]
+  #   format: "openai"
+  #   response_format: "openai"
+  #   health_check_path: "/health"
+  #   circuit_breaker:
+  #     failure_threshold: 3
+  #     cooldown_seconds: 20
+
+escalation:
+  enabled: true          # set false to disable if it causes problems
+  loop_threshold: 50     # escalate after this many loops with no commits
+  backends:              # strongest-first override order
+    - minimax
+    - opencode
+    - kimi
+    - openrouter
+
+routing:
+  # Vision requests (image_url in messages) go to the VLM pool
+  vision_backends:
+    - vlm-m4-1
+    - vlm-m4-2
+    - vlm-3070
+
+  # Default text routing -- MiniMax first, then Kimi, OpenCode, OpenRouter as last resort
+  default_backends:
+    - minimax
+    - kimi
+    - opencode
+    - openrouter
+
+  # Task-type routing via X-Task-Type header
+  task_type_backends:
+    feature:    [minimax, opencode, kimi, openrouter]
+    refactor:   [minimax, opencode, kimi, openrouter]
+    bug:        [kimi, opencode, minimax, openrouter]
+    polish:     [kimi, opencode, minimax, openrouter]
+    research:   [opencode, kimi, openrouter, minimax]  # deepseek cheap for read-only
+    plan:       [opencode, kimi, openrouter, minimax]
+    qa:         [minimax, opencode, openrouter]        # needs vision
+    art_pass:   [minimax, opencode, openrouter]        # needs vision

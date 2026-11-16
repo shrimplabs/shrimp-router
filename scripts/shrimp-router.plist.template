@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd agent: keeps shrimp-router running and starts it at login (macOS).
+  Install (from the repo root):
+    sed "s#__REPO_DIR__#$PWD#g" scripts/shrimp-router.plist.template \
+      > ~/Library/LaunchAgents/io.shrimplabs.shrimp-router.plist
+    launchctl load ~/Library/LaunchAgents/io.shrimplabs.shrimp-router.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.shrimplabs.shrimp-router</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__REPO_DIR__/.venv/bin/shrimp-router</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SHRIMP_ROUTER_CONFIG</key>
+        <string>__REPO_DIR__/config.yaml</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>__REPO_DIR__</string>
+
+    <!-- Restart automatically on crash or exit -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Wait 5s before restarting to avoid rapid restart loops -->
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <!-- Log stdout/stderr to the existing log file location -->
+    <key>StandardOutPath</key>
+    <string>/private/tmp/shrimp-router-autohealer.log</string>
+    <key>StandardErrorPath</key>
+    <string>/private/tmp/shrimp-router-autohealer.log</string>
+
+    <!-- Start at login -->
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

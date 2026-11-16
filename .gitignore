@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.env
+config.yaml
+.swarmproject
+
+# Operator-only notes (port maps, local setup); never published
+internal/
+# Local backups of config.yaml / .env (hold keys and machine names)
+*.bak
+*.bak-*
